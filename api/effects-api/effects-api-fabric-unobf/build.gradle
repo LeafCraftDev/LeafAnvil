@@ -38,7 +38,7 @@ ext {
     // follow-up will share these pins across all three modules.
     minecraftVersion       = '26.1.2'
     loaderVersion          = '0.18.4'
-    fabricApiVersion       = '0.143.5+26.1'
+    fabricApiVersion       = '0.165.1+'
     permissionsApiVersion  = '0.3.1'
 }
 
