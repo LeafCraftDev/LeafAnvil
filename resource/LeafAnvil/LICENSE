@@ -1,0 +1,47 @@
+LeafCraft Commercial Software License (LicenseRef-LeafCraft-Commercial)
+
+Copyright (c) 2026 Leaf26 / LeafCraft. All rights reserved.
+
+This license governs the LeafAnvil runtime plugin and mod distribution
+(LeafAnvil-<version>.jar) and all net.leaf.anvil.* modules under
+resource/LeafAnvil/ ("the Software").
+
+1. Commercial Server & Network License Grant
+Subject to purchase of a valid license from an authorized LeafCraft storefront
+(such as BuiltByBit, Polymart, SpigotMC Premium, or an official LeafCraft
+distribution channel), the copyright holder grants the purchaser ("Licensee")
+a non-exclusive, worldwide, perpetual license to install, configure, and execute
+the Software on Minecraft servers and proxy networks owned or operated by the
+Licensee, including commercially monetized servers and networks.
+
+2. Restrictions on Redistribution & Resale
+Except as expressly permitted in Section 3 (Open .lca Format & Interoperability
+Carve-Out), the Licensee may NOT:
+  (a) redistribute, republish, upload, mirror, leak, sublicense, rent, lease,
+      or resell the Software JAR, compiled bytecode, or source files;
+  (b) publish modified or unmodified copies of the Software on public package
+      registries, code hosting platforms, or plugin/mod marketplaces; or
+  (c) remove or alter copyright notices, license files, or attribution metadata
+      packaged within the Software.
+
+3. Open .lca Format Specification & anvil-api Interoperability Carve-Out
+  (a) World Data Ownership: The Licensee retains 100% ownership and unrestricted
+      control over all world save files (.lca, .mca, .linear, and backups)
+      created, converted, compacted, or repaired by the Software.
+  (b) Open Format Specification (MIT): The .lca (LeafCraft Anvil) binary format
+      Interface Control Document (api/anvil-api/docs/ICD.md, bundled at
+      docs/ICD.md, LCA-ICD-1.0) and the shared io.github.dailystruggle.anvil
+      codec library (api/anvil-api) are licensed separately under the MIT
+      License. Any developer, server fork, world generator, map renderer, or
+      external tool may freely inspect, implement, or reverse-engineer the .lca
+      binary format and anvil-api for reading, writing, or interoperating with
+      .lca archives.
+
+4. Disclaimer of Warranty & Limitation of Liability
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

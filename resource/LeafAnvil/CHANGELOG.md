@@ -1,0 +1,13 @@
+# Changelog
+
+All notable changes to `LeafAnvil` are documented in this file.
+
+## [0.1.0] - 2026-10-31
+
+### Added
+- Unified multi-loader `.lca` (LeafCraft Anvil) world save format plugin & mod (`LeafAnvil-0.1.0.jar`) for Paper, Folia, Spigot, Fabric, and NeoForge (`leafanvil-ADR-001`, `anvil-api-ADR-002`, `anvil-api-ADR-003`).
+- Zero-fork runtime `RegionFileStorage` and Moonrise bytecode interceptor (`NmsRegionStorageInterceptor`) generating `$$LeafAnvilCacheBridge` (`Long2ObjectLinkedOpenHashMap`) and `$$LeafAnvilRfBridge` (`RegionFile`) subclasses at runtime to route `region/` (`STORAGE_KIND_REGION_VOXEL = 0`), `entities/` (`STORAGE_KIND_ENTITIES = 1`), and `poi/` (`STORAGE_KIND_POI = 2`) reads, stream writes, Moonrise `write(ChunkPos, ByteBuffer)` writes, existence checks, clears, flushes, and closes through disk-backed `.lca` (`LcaRegionFileStorage` / `LcaLiveArchive`).
+- Pre-open vanilla `RegionFile` cache flush/close, Moonrise `nonExistingRegionFiles` (`LongLinkedOpenHashSet`) clearing, Moonrise `RegionFile` field initialization (`version = VERSION_NONE`, `info`, `recalculateCount`, `oversized`, `path`), and live `RegionFileStorage.folder` dimension directory resolution supporting classic (`world/`, `DIM-1/`, `DIM1/`) and Minecraft `26.1+` unified `dimensions/<namespace>/<dimension>/` layouts.
+- Lazy on-open `.mca` / `.linear` -> `.lca` atomic migration (`tryMigrateLegacyRegion` preserving `.mca.bak` backups), reversible batch world conversion (`LeafAnvilWorldConverter#convertWorldToLca` and `convertWorldToMca`), `256B` Copy-on-Write (`CoW`) free-slab compaction (`compactOpenRegions`), and 4-tier Extended Hamming `(72, 64)` SEC-DED + `256B` slab reverse-scan + section `octreeOccupancyMask64` quarantine + `CoW` rollback bit-rot recovery (`healAndVerifyWorld`).
+- Platform-neutral `/leafanvil` (alias `/lca`) `CommandsAPI` command tree (`status`, `convert [world=<name|all>] [format=<lca|mca>]`, `compact [world=<name|all>]`, `heal [world=<name|all>]`, `reload`) with single-flight async batch execution (`REQ-RTP-S-005`) and configurable `config.yml` / `messages.yml` feedback (`REQ-RTP-S-007`).
+- Continuous multi-platform statistical benchmark driver (`scripts/bench_lca_multiplatform.py`) comparing `without-lca` (`.mca`) vs. `with-lca` (`.lca`) across Paper, Folia, Fabric, and NeoForge (`--mode rotate` and `--mode parallel`).
