@@ -81,7 +81,7 @@ pluginManagement {
         // blocked) cannot build the NeoForge adapters at all and must drop them
         // with -PexcludeNeoforge (whole platform) or -PexcludeJdk25 (just the
         // JDK-25 26.1 carrier). Both leave the rest of the build untouched.
-        id 'net.neoforged.moddev'              version '2.0.141'
+        id 'net.neoforged.moddev'              version '2.0.148'
     }
 }
 
