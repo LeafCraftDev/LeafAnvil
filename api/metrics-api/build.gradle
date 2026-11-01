@@ -24,7 +24,7 @@ dependencies {
     // imports org.bukkit.* / net.minecraft.* / Folia internals. Same
     // artifact + version as rtp-core, rtp-anvil, rtp-bukkit-common,
     // rtp-folia-common, maps-api.
-    testImplementation 'com.tngtech.archunit:archunit-junit5:1.3.0'
+    testImplementation 'com.tngtech.archunit:archunit-junit5:1.5.1'
 }
 
 java {

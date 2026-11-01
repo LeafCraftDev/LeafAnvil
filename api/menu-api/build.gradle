@@ -16,7 +16,7 @@ dependencies {
     api project(':server-api')
     api project(':commands-api')
     compileOnly 'org.jetbrains:annotations:24.1.0'
-    testImplementation 'com.tngtech.archunit:archunit-junit5:1.3.0'
+    testImplementation 'com.tngtech.archunit:archunit-junit5:1.5.1'
 }
 
 javadoc {

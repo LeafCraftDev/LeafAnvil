@@ -23,7 +23,7 @@ dependencies {
     // (no chunk I/O, no .get() / .join(), no platform imports under
     // mapsapi.render). Same artifact + version as rtp-core, rtp-anvil,
     // rtp-bukkit-common, rtp-folia-common.
-    testImplementation 'com.tngtech.archunit:archunit-junit5:1.3.0'
+    testImplementation 'com.tngtech.archunit:archunit-junit5:1.5.1'
 
     // MockBukkit - in-process Bukkit server fixture for BukkitMapBindingTest
     // (CHECKLIST-maps-api.md Stage 2.9). Same coordinate as rtp-bukkit-common.
