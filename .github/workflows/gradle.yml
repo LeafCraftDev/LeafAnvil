@@ -349,6 +349,8 @@ jobs:
         if: env.SONAR_TOKEN != ''
         env:
           ALL_SETS: ${{ needs.changes.outputs.full }}
+          SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+          SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION }}
         run: |
           if [ "$ALL_SETS" = "true" ]; then
             ./gradlew sonar -PstaticAnalysis

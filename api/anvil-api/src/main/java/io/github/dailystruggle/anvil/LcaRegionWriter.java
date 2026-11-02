@@ -513,7 +513,7 @@ public final class LcaRegionWriter {
      * slab pool in heap.</p>
      */
     public static LcaLiveArchive openLiveArchive(Path lcaFile) throws IOException {
-        return openLiveArchive(lcaFile, 1);
+        return openLiveArchive(lcaFile, -1);
     }
 
     public static LcaLiveArchive openLiveArchive(Path lcaFile, int preferredZstdLevel) throws IOException {
@@ -588,6 +588,7 @@ public final class LcaRegionWriter {
         private final int sectionCount;
         private final int defaultDataVersion;
         private final boolean modeBZstd;
+        private final boolean writeModeBZstd;
         private final int zstdLevel;
         private final int storageKind;
         private final int rootDictCapacityBytes;
@@ -702,7 +703,8 @@ public final class LcaRegionWriter {
             this.defaultDataVersion = defaultDataVersion;
             int normLevel = normalizeZstdLevel(zstdLevel);
             this.modeBZstd = resolveEffectiveModeB(normLevel > 0);
-            this.zstdLevel = this.modeBZstd ? normLevel : 0;
+            this.writeModeBZstd = this.modeBZstd;
+            this.zstdLevel = this.writeModeBZstd ? normLevel : 0;
             this.storageKind = storageKind & 0xFF;
             this.rootDictCapacityBytes = rootDictCapacityBytes;
             this.secDedTableOffset = (LcaRegionReader.DICT_ROOT_OFFSET + rootDictCapacityBytes + 255) & ~255;
@@ -736,7 +738,8 @@ public final class LcaRegionWriter {
             this.sectionCount = parsed.sectionCount;
             this.defaultDataVersion = parsed.defaultDataVersion;
             this.modeBZstd = (parsed.flags & 8) != 0;
-            this.zstdLevel = this.modeBZstd ? 1 : 0;
+            this.writeModeBZstd = resolveEffectiveModeB(this.modeBZstd);
+            this.zstdLevel = this.writeModeBZstd ? 1 : 0;
             this.storageKind = parsed.storageKind;
 
             long dictOffsetAndLen = (long) LcaRegionReader.LONG_BE_VIEW.get(existingBytes, 0x20);
@@ -834,7 +837,7 @@ public final class LcaRegionWriter {
         }
 
         LcaLiveArchive(Path lcaFile, FileChannel ch, int validByteLength) throws IOException {
-            this(lcaFile, ch, validByteLength, 1);
+            this(lcaFile, ch, validByteLength, -1);
         }
 
         LcaLiveArchive(Path lcaFile, FileChannel ch, int validByteLength, int preferredZstdLevel) throws IOException {
@@ -861,9 +864,12 @@ public final class LcaRegionWriter {
             this.storageKind = initBuf[0x0A] & 0xFF;
             int flags = initBuf[0x0B] & 0xFF;
             boolean fileFlagModeB = (flags & 8) != 0;
-            int normPref = normalizeZstdLevel(preferredZstdLevel);
-            this.modeBZstd = fileFlagModeB || resolveEffectiveModeB(normPref > 0);
-            this.zstdLevel = this.modeBZstd ? (normPref > 0 ? normPref : 1) : 0;
+            int normPref = preferredZstdLevel < 0
+                    ? (fileFlagModeB ? 1 : 0)
+                    : normalizeZstdLevel(preferredZstdLevel);
+            this.modeBZstd = fileFlagModeB;
+            this.writeModeBZstd = resolveEffectiveModeB(normPref > 0);
+            this.zstdLevel = this.writeModeBZstd ? normPref : 0;
             this.regionX = LcaSectionCodec.readIntBE(initBuf, 0x0C);
             this.regionZ = LcaSectionCodec.readIntBE(initBuf, 0x10);
             this.minSectionY = LcaSectionCodec.readIntBE(initBuf, 0x14);
@@ -2158,7 +2164,7 @@ public final class LcaRegionWriter {
             try {
                 writeSlabBytes(targetSlab, payload);
                 writeFooterCanary();
-                long ptr = packChunkPointer64(targetSlab, resolveEffectiveModeB(modeBZstd), payload.length, 1);
+                long ptr = packChunkPointer64(targetSlab, writeModeBZstd, payload.length, 1);
                 buffer[secDedTableOffset + chunkIdx] = (byte) LcaSectionCodec.computeHammingSecDed8(ptr);
                 LcaRegionReader.setVolatileLongBE(buffer, ptrByteOffset, ptr);
                 persistPointerAndSecDed(chunkIdx);
@@ -2289,7 +2295,7 @@ public final class LcaRegionWriter {
 
                 VarHandle.releaseFence();
                 int nextGen = (oldGen + 1) & 0xFF;
-                long newPtr = packChunkPointer64(newSlabStart, resolveEffectiveModeB(modeBZstd), payload.length, nextGen);
+                long newPtr = packChunkPointer64(newSlabStart, writeModeBZstd, payload.length, nextGen);
                 buffer[secDedTableOffset + chunkIdx] = (byte) LcaSectionCodec.computeHammingSecDed8(newPtr);
                 LcaRegionReader.setVolatileLongBE(buffer, ptrByteOffset, newPtr);
                 persistPointerAndSecDed(chunkIdx);
@@ -2328,7 +2334,7 @@ public final class LcaRegionWriter {
             payload[1] = (byte) ((patchedDvWord >>> 16) & 0xFF);
             payload[2] = (byte) ((patchedDvWord >>> 8) & 0xFF);
             payload[3] = (byte) (patchedDvWord & 0xFF);
-            if (resolveEffectiveModeB(modeBZstd)) {
+            if (writeModeBZstd) {
                 int headerLen = 24 + (sectionCount << 1);
                 if (payload.length > headerLen && payload.length >= 8) {
                     long word0 = (long) LcaRegionReader.LONG_BE_VIEW.get(payload, 0);
@@ -2546,7 +2552,7 @@ public final class LcaRegionWriter {
                     && isEmptyNbtList(chunkRoot.get("block_entities"))
                     && isEmptyNbtList(chunkRoot.get("block_ticks"))
                     && isEmptyNbtList(chunkRoot.get("fluid_ticks"));
-            boolean effectiveModeB = resolveEffectiveModeB(modeBZstd);
+            boolean effectiveModeB = writeModeBZstd;
             byte[] residualNbtBytes;
             if (canCacheResidual && hmObj != null && hmObj == cachedHeightmapRef[chunkIdx] && cachedResidualBytes[chunkIdx] != null) {
                 residualNbtBytes = cachedResidualBytes[chunkIdx];

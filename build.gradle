@@ -1140,8 +1140,8 @@ tasks.register('jacocoServerReport', JacocoReport) {
 
 sonar {
     properties {
-        property 'sonar.projectKey', 'DailyStruggle_RTP'
-        property 'sonar.organization', 'dailystruggle'
+        property 'sonar.projectKey', System.getenv('SONAR_PROJECT_KEY') ?: 'LeafCraftDev_LeafAnvil'
+        property 'sonar.organization', System.getenv('SONAR_ORGANIZATION') ?: 'leafcraftdev'
         property 'sonar.host.url', 'https://sonarcloud.io'
         property 'sonar.coverage.exclusions', [
                 '**/test/**',

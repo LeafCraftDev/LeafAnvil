@@ -467,7 +467,14 @@ def _resolve_images(line_no, line, source_dir=SOURCE.parent, raw_base=RAW_BASE):
         except ValueError:
             raise FrontPageError(f"line {line_no}: local image '{src}' resolves outside the repository: {candidate}")
 
-        new_url = f"{raw_base.rstrip('/')}/{rel_to_root}{suffix}"
+        eff_raw_base = raw_base
+        if raw_base == RAW_BASE:
+            owner = _match_product_for_rel(rel_to_root)
+            if owner is not None and owner.repo_base != REPO_BASE and owner.repo_base.startswith("https://github.com/"):
+                repo_slug = owner.repo_base[len("https://github.com/"):].strip("/")
+                eff_raw_base = f"https://raw.githubusercontent.com/{repo_slug}/{owner.repo_branch}"
+
+        new_url = f"{eff_raw_base.rstrip('/')}/{rel_to_root}{suffix}"
         return f"![{alt}]({new_url})"
 
     return _IMAGE.sub(repl, line)
@@ -544,11 +551,14 @@ def _resolve_doc_links(line_no, line, source_dir=SOURCE.parent, repo_base=REPO_B
         owner = _match_product_for_rel(rel)
         eff_repo_base = repo_base
         eff_repo_branch = repo_branch
-        if owner is not None and (source_product is None or owner.product_id != source_product.product_id):
+        cross_product = owner is not None and (source_product is None or owner.product_id != source_product.product_id)
+        if cross_product:
             eff_repo_base = owner.repo_base
             eff_repo_branch = owner.repo_branch
         url = None
-        if (candidate.is_file() or sibling_product_md) and candidate.suffix == ".md":
+        if cross_product and rel.lower().endswith("/docs/publishing/front_page.md"):
+            url = eff_repo_base
+        elif (candidate.is_file() or sibling_product_md) and candidate.suffix == ".md":
             try:
                 url = _site_url(candidate.relative_to(DOCS_DIR).as_posix())
             except ValueError:

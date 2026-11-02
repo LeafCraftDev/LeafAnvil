@@ -1739,7 +1739,7 @@ final class LcaSectionCodec {
         for (int i = 0; i < SECTION_VOXELS; i++) {
             int val = 0;
             for (int b = 0; b < flatBits; b++) {
-                if ((buf[pos + (bitPos >>> 3)] & (1 << (bitPos & 7))) != 0) {
+                if (((buf[pos + (bitPos >>> 3)] & 0xFF) & (1 << (bitPos & 7))) != 0) {
                     val |= (1 << b);
                 }
                 bitPos++;
