@@ -43,13 +43,13 @@ Provide **`LeafAnvil` (`resource/LeafAnvil`)** as a multi-loader plugin and mod 
 
 5. **Commercial Carrier Licensing with Open `.lca` Format & `anvil-api` Carve-Out:**
    - The `LeafAnvil` runtime carrier (`resource/LeafAnvil`, `net.leaf.anvil.*`, and `LeafAnvil-<version>.jar`) is a commercial product governed by `resource/LeafAnvil/LICENSE` (`LicenseRef-LeafCraft-Commercial`, packaged at `META-INF/leafanvil/LICENSE`) and guarded as a private path in `scripts/pre_push_guard.py`.
-   - The `.lca` binary format Interface Control Document ([`api/anvil-api/docs/ICD.md`](../../../../api/anvil-api/docs/ICD.md), also mirrored at `resource/LeafAnvil/docs/ICD.md` and packaged in `LeafAnvil-<version>.jar`, `LCA-ICD-1.0`) and the `io.github.dailystruggle.anvil` codec library (`api/anvil-api`) remain licensed under the **MIT License** so `LeafRTP`, `LeafMap`, world generators, server forks, and third-party tools can freely read, write, or reverse-engineer `.lca` for ecosystem interoperability.
+   - The `.lca` binary format Interface Control Document ([`api/anvil-api/docs/ICD.md`](../../../../api/anvil-api/docs/ICD.md), routed from `resource/LeafAnvil/docs/ICD.md` and packaged directly into `LeafAnvil-<version>.jar`, `LCA-ICD-1.0`) and the `io.github.dailystruggle.anvil` codec library (`api/anvil-api`) remain licensed under the **MIT License** so `LeafRTP`, world generators, server forks, map renderers, and third-party tools can freely read, write, or reverse-engineer `.lca` for ecosystem interoperability.
 
 ## Consequences
 
 - **Positive:**
   - Paper, Folia, Spigot, Fabric, and NeoForge servers can read and write `.lca` archives via a plugin/mod carrier, with reversible batch conversion back to `.mca`.
-  - `LeafRTP` (`AnvilPrefilter`, `LcaRegionReader`) and `LeafMap` (`WorldBlockFeed`) detect `.lca` regions on disk via `RegionFormatDetector` (`PrimaryFormat.LCA`).
+  - `LeafRTP` (`AnvilPrefilter`, `LcaRegionReader`) and `WorldBlockFeed` detect `.lca` regions on disk via `RegionFormatDetector` (`PrimaryFormat.LCA`).
 - **Safety (`REQ-RTP-S-004`, `REQ-RTP-S-005`, `REQ-RTP-S-007`):**
   - All lazy migrations and batch conversions write to a temporary file (`.lca.tmp` / `.mca.tmp`) and commit via `ATOMIC_MOVE`, preserving `.bak` backups when `backup-migrated-legacy-files: true`.
   - Batch commands execute off the server tick thread and report configurable feedback via `messages.yml`.

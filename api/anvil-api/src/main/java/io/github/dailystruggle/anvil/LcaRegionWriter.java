@@ -148,7 +148,7 @@ public final class LcaRegionWriter {
         int defaultDataVersion = 3953;
         boolean foundAny = false;
 
-        @SuppressWarnings("unchecked")
+        @SuppressWarnings({"unchecked", "rawtypes"})
         LinkedHashMap<String, Object>[] roots = new LinkedHashMap[1024];
 
         for (int rz = 0; rz < 32; rz++) {
@@ -2320,6 +2320,283 @@ public final class LcaRegionWriter {
             return payload.length;
         }
 
+        synchronized byte[] readUncompressedChunkFrame(int rx, int rz) throws IOException {
+            int chunkIdx = (rx & 31) | ((rz & 31) << 5);
+            long ptr = LcaRegionReader.getVolatileLongBE(
+                    buffer, LcaRegionReader.POINTER_DIRECTORY_OFFSET + (chunkIdx << 3));
+            int slabStart = (int) (ptr >>> 29);
+            int codec1 = (int) ((ptr >>> 28) & 1L);
+            int byteLen = (int) ((ptr >>> 8) & 0xFFFFFL);
+            if (slabStart <= 0 || byteLen <= 0) {
+                return null;
+            }
+            int byteOff = slabStart << LcaRegionReader.SLAB_SHIFT;
+            byte[] rawSlab;
+            if (headerOnlyChannelMode && channel != null && channel.isOpen()) {
+                rawSlab = new byte[byteLen];
+                readChannelRangeStatic(channel, byteOff, rawSlab, 0, byteLen, backingFile);
+            } else {
+                rawSlab = Arrays.copyOfRange(buffer, byteOff, byteOff + byteLen);
+            }
+            if (codec1 == 0) {
+                return rawSlab;
+            }
+            int headerLen = 24 + (sectionCount << 1);
+            int headerWords = (headerLen + 7) >>> 3;
+            int compOff = headerLen + headerWords;
+            byte[] body = DynamicZstdBinding.decompress(
+                    rawSlab, compOff, rawSlab.length - compOff, LcaRegionReader.MAX_CHUNK_UNCOMPRESSED_BYTES);
+            byte[] full = new byte[headerLen + body.length];
+            System.arraycopy(rawSlab, 0, full, 0, headerLen);
+            System.arraycopy(body, 0, full, headerLen, body.length);
+            return full;
+        }
+
+        /**
+         * Appends or replaces a `HAS_CHUNK_PATCH_TAIL (0x4000)` delta record (`LCA-ICD-1.0` Section 8.3)
+         * on chunk `(rx, rz)` using Copy-on-Write (`CoW`) slab rotation without re-encoding any
+         * untouched `SectionFrame`.
+         */
+        synchronized int applyChunkPatchCoW(
+                int rx,
+                int rz,
+                List<String> appendedStates,
+                List<LcaSectionCodec.SectionPatch> sectionPatches
+        ) throws IOException {
+            byte[] frame = readUncompressedChunkFrame(rx, rz);
+            if (frame == null) {
+                throw new IOException("Cannot patch ungenerated chunk (" + rx + "," + rz + ")");
+            }
+            int sectionDirEnd = 24 + (sectionCount << 1);
+            int chunkFlags = frame[21] & 0xFF;
+            boolean hasResidualNbt = (chunkFlags & 1) != 0;
+            boolean hasSlabLocalPalette = (chunkFlags & 2) != 0;
+            boolean scale4B = (chunkFlags & 4) != 0;
+            int unitShift = scale4B ? 2 : 0;
+            int residualRelStart = hasResidualNbt
+                    ? sectionDirEnd + (LcaSectionCodec.readUint16BE(frame, 22) << unitShift)
+                    : frame.length;
+
+            int[] relStarts = new int[sectionCount];
+            for (int i = 0; i < sectionCount; i++) {
+                int entry16 = LcaSectionCodec.readUint16BE(frame, 24 + (i << 1));
+                relStarts[i] = (entry16 != 0 && (entry16 & 0x8000) == 0)
+                        ? sectionDirEnd + ((entry16 - 1) << unitShift)
+                        : -1;
+            }
+            int baseLocalStateCount = 0;
+            if (hasSlabLocalPalette) {
+                int paletteLimitRel = LcaSectionCodec.findFirstSectionRelStart(relStarts, sectionCount, residualRelStart);
+                LcaSectionCodec.SlabLocalPalette localPal = LcaSectionCodec.decodeSlabLocalPalette(
+                        frame, 0, sectionDirEnd, paletteLimitRel, false, false, idToBlockState);
+                baseLocalStateCount = localPal.baseBlockNames.size();
+            }
+
+            List<String> appStates = appendedStates == null ? Collections.emptyList() : appendedStates;
+            int[] appGlobalIds = new int[appStates.size()];
+            for (int i = 0; i < appStates.size(); i++) {
+                String st = appStates.get(i);
+                int bracket = st.indexOf('[');
+                if (bracket >= 0 && LcaSectionCodec.STATIC_CORE_PROP_TO_ID.get(st.substring(bracket)) == null) {
+                    appGlobalIds[i] = registerOrGetBlockStateId(st);
+                } else {
+                    appGlobalIds[i] = -1;
+                }
+            }
+
+            byte[] patchTailBytes = LcaSectionCodec.encodeChunkPatchTailBytes(
+                    baseLocalStateCount, appStates, appGlobalIds, sectionPatches);
+            byte[] patchedFrame = LcaSectionCodec.injectChunkPatchTailIntoUncompressedFrame(
+                    frame, sectionCount, patchTailBytes);
+
+            byte[] finalPayload = writeModeBZstd
+                    ? LcaSectionCodec.encodeModeBChunkFrameWithUncompressedHeader(
+                            patchedFrame, sectionDirEnd, Math.max(1, zstdLevel))
+                    : patchedFrame;
+            return commitPreEncodedChunkCoW(rx, rz, finalPayload);
+        }
+
+        /**
+         * Re-encodes a single modified $16 \times 16 \times 16$ section (`sectionY`) and appends its
+         * `SectionFrame` out-of-order into the chunk's `256-byte` sub-slab slack (either immediately
+         * before `residualRelStart` when `placeAfterResidualTail == false`, or after the Residual Tail
+         * when `placeAfterResidualTail == true`), without re-encoding the remaining 23 sections
+         * (`LCA-ICD-1.0` Section 6.4 & Section 8.3).
+         */
+        synchronized int spliceOutOfOrderSectionCoW(
+                int rx,
+                int rz,
+                int sectionY,
+                Map<String, Object> replacementSectionNbt,
+                boolean placeAfterResidualTail,
+                boolean usePatchTailReplacementOffset
+        ) throws IOException {
+            int secIdx = sectionY - minSectionY;
+            if (secIdx < 0 || secIdx >= sectionCount) {
+                throw new IllegalArgumentException("sectionY out of range: " + sectionY);
+            }
+            byte[] frame = readUncompressedChunkFrame(rx, rz);
+            if (frame == null) {
+                throw new IOException("Cannot splice section into ungenerated chunk (" + rx + "," + rz + ")");
+            }
+            int sectionDirEnd = 24 + (sectionCount << 1);
+            int chunkFlags = frame[21] & 0xFF;
+            boolean hasResidualNbt = (chunkFlags & 1) != 0;
+            boolean hasSlabLocalPalette = (chunkFlags & 2) != 0;
+            boolean scale4B = (chunkFlags & 4) != 0;
+            int unitShift = scale4B ? 2 : 0;
+            int unitAlign = 1 << unitShift;
+            int defaultBiomeCode = (chunkFlags >>> 3) & 0x1F;
+            int defaultBiomeDictId = defaultBiomeCode > 0 ? (defaultBiomeCode - 1) : -1;
+            int residualRelStart = hasResidualNbt
+                    ? sectionDirEnd + (LcaSectionCodec.readUint16BE(frame, 22) << unitShift)
+                    : frame.length;
+
+            int[] relStarts = new int[sectionCount];
+            for (int i = 0; i < sectionCount; i++) {
+                int entry16 = LcaSectionCodec.readUint16BE(frame, 24 + (i << 1));
+                relStarts[i] = (entry16 != 0 && (entry16 & 0x8000) == 0)
+                        ? sectionDirEnd + ((entry16 - 1) << unitShift)
+                        : -1;
+            }
+
+            Map<String, Integer> localStateMap = new LinkedHashMap<>();
+            List<String> localStateList = new ArrayList<>();
+            List<Integer> localStateGlobalIds = new ArrayList<>();
+            Map<String, Integer> localBiomeMap = new LinkedHashMap<>();
+            List<String> localBiomeList = new ArrayList<>();
+            int baseLocalStateCount = 0;
+
+            if (hasSlabLocalPalette) {
+                int paletteLimitRel = LcaSectionCodec.findFirstSectionRelStart(relStarts, sectionCount, residualRelStart);
+                LcaSectionCodec.SlabLocalPalette localPal = LcaSectionCodec.decodeSlabLocalPalette(
+                        frame, 0, sectionDirEnd, paletteLimitRel, true, true, idToBlockState);
+                baseLocalStateCount = localPal.canonicalStates.size();
+                for (int i = 0; i < baseLocalStateCount; i++) {
+                    String s = localPal.canonicalStates.get(i);
+                    localStateMap.put(s, i);
+                    localStateList.add(s);
+                    localStateGlobalIds.add(-1);
+                }
+                for (int i = 0; i < localPal.biomes.size(); i++) {
+                    String b = localPal.biomes.get(i);
+                    localBiomeMap.put(b, i);
+                    localBiomeList.add(b);
+                }
+            }
+
+            int[] blockDictIds = extractBlockPaletteIds(
+                    replacementSectionNbt,
+                    hasSlabLocalPalette ? localStateMap : null,
+                    hasSlabLocalPalette ? localStateList : null,
+                    hasSlabLocalPalette ? localStateGlobalIds : null);
+            long[] blockData = extractBlockDataLongs(replacementSectionNbt);
+            int[] biomeDictIds = extractBiomeIds(
+                    replacementSectionNbt,
+                    hasSlabLocalPalette ? localBiomeMap : null,
+                    hasSlabLocalPalette ? localBiomeList : null);
+            long[] biomeData = extractBiomeDataLongs(replacementSectionNbt);
+            byte[] skyLight = replacementSectionNbt.get("SkyLight") instanceof byte[] b && b.length == 2048 ? b : null;
+            byte[] blkLight = replacementSectionNbt.get("BlockLight") instanceof byte[] b && b.length == 2048 ? b : null;
+
+            LcaSectionCodec.EncodedSection enc = LcaSectionCodec.encodeSection(
+                    blockDictIds, blockData, biomeDictIds, biomeData,
+                    skyLight, blkLight, defaultBiomeDictId, -1);
+            // Force a non-uniform SectionFrame body when testing out-of-order section frame placement
+            byte[] secFrameBytes = enc.frameBytes;
+            if (secFrameBytes == null || secFrameBytes.length == 0) {
+                LcaSectionCodec.EncodedSection forced = LcaSectionCodec.encodeSection(
+                        blockDictIds, blockData, biomeDictIds, biomeData,
+                        skyLight, blkLight, -2, -1);
+                secFrameBytes = forced.frameBytes;
+            }
+
+            List<String> appendedStates = (hasSlabLocalPalette && localStateList.size() > baseLocalStateCount)
+                    ? new ArrayList<>(localStateList.subList(baseLocalStateCount, localStateList.size()))
+                    : Collections.emptyList();
+            int[] appendedGlobalIds = new int[appendedStates.size()];
+            for (int i = 0; i < appendedStates.size(); i++) {
+                appendedGlobalIds[i] = localStateGlobalIds.get(baseLocalStateCount + i);
+            }
+
+            // If we have appended states or usePatchTailReplacementOffset, inject ChunkPatchTail first if placing after residual
+            byte[] workingFrame = frame;
+            if (placeAfterResidualTail) {
+                if (!appendedStates.isEmpty() && !usePatchTailReplacementOffset) {
+                    byte[] patchPayload = LcaSectionCodec.encodeChunkPatchTailBytes(
+                            baseLocalStateCount, appendedStates, appendedGlobalIds, Collections.emptyList());
+                    workingFrame = LcaSectionCodec.injectChunkPatchTailIntoUncompressedFrame(
+                            workingFrame, sectionCount, patchPayload);
+                } else if (usePatchTailReplacementOffset) {
+                    // First inject a placeholder with 2-byte replacementSectionEntry16 to stabilize residual tail length
+                    List<LcaSectionCodec.SectionPatch> placeholder = List.of(
+                            new LcaSectionCodec.SectionPatch(
+                                    secIdx, LcaSectionCodec.PATCH_FLAG_REPLACEMENT_OFFSET, 1, null, null, null, null));
+                    byte[] placeholderBytes = LcaSectionCodec.encodeChunkPatchTailBytes(
+                            baseLocalStateCount, appendedStates, appendedGlobalIds, placeholder);
+                    workingFrame = LcaSectionCodec.injectChunkPatchTailIntoUncompressedFrame(
+                            workingFrame, sectionCount, placeholderBytes);
+                }
+                int alignedStart = (workingFrame.length + (unitAlign - 1)) & ~(unitAlign - 1);
+                int newEntry16 = ((alignedStart - sectionDirEnd) >>> unitShift) + 1;
+                byte[] withAppendedSec = new byte[alignedStart + secFrameBytes.length];
+                System.arraycopy(workingFrame, 0, withAppendedSec, 0, workingFrame.length);
+                System.arraycopy(secFrameBytes, 0, withAppendedSec, alignedStart, secFrameBytes.length);
+                if (usePatchTailReplacementOffset) {
+                    List<LcaSectionCodec.SectionPatch> realPatch = List.of(
+                            new LcaSectionCodec.SectionPatch(
+                                    secIdx, LcaSectionCodec.PATCH_FLAG_REPLACEMENT_OFFSET, newEntry16, null, null, null, null));
+                    byte[] realPatchBytes = LcaSectionCodec.encodeChunkPatchTailBytes(
+                            baseLocalStateCount, appendedStates, appendedGlobalIds, realPatch);
+                    workingFrame = LcaSectionCodec.injectChunkPatchTailIntoUncompressedFrame(
+                            withAppendedSec, sectionCount, realPatchBytes);
+                } else {
+                    withAppendedSec[24 + (secIdx << 1)] = (byte) ((newEntry16 >>> 8) & 0xFF);
+                    withAppendedSec[24 + (secIdx << 1) + 1] = (byte) (newEntry16 & 0xFF);
+                    workingFrame = withAppendedSec;
+                }
+            } else {
+                // Place out-of-order immediately before residualRelStart
+                int insertPos = (residualRelStart + (unitAlign - 1)) & ~(unitAlign - 1);
+                int newEntry16 = ((insertPos - sectionDirEnd) >>> unitShift) + 1;
+                int afterSecPos = (insertPos + secFrameBytes.length + (unitAlign - 1)) & ~(unitAlign - 1);
+                int residualLen = workingFrame.length - residualRelStart;
+                byte[] spliced = new byte[afterSecPos + residualLen];
+                System.arraycopy(workingFrame, 0, spliced, 0, residualRelStart);
+                System.arraycopy(secFrameBytes, 0, spliced, insertPos, secFrameBytes.length);
+                if (residualLen > 0) {
+                    System.arraycopy(workingFrame, residualRelStart, spliced, afterSecPos, residualLen);
+                }
+                int newResidualRelOffset = (afterSecPos - sectionDirEnd) >>> unitShift;
+                spliced[22] = (byte) ((newResidualRelOffset >>> 8) & 0xFF);
+                spliced[23] = (byte) (newResidualRelOffset & 0xFF);
+                if (usePatchTailReplacementOffset || !appendedStates.isEmpty()) {
+                    List<LcaSectionCodec.SectionPatch> patches = usePatchTailReplacementOffset
+                            ? List.of(new LcaSectionCodec.SectionPatch(
+                                    secIdx, LcaSectionCodec.PATCH_FLAG_REPLACEMENT_OFFSET, newEntry16, null, null, null, null))
+                            : Collections.emptyList();
+                    if (!usePatchTailReplacementOffset) {
+                        spliced[24 + (secIdx << 1)] = (byte) ((newEntry16 >>> 8) & 0xFF);
+                        spliced[24 + (secIdx << 1) + 1] = (byte) (newEntry16 & 0xFF);
+                    }
+                    byte[] patchPayload = LcaSectionCodec.encodeChunkPatchTailBytes(
+                            baseLocalStateCount, appendedStates, appendedGlobalIds, patches);
+                    workingFrame = LcaSectionCodec.injectChunkPatchTailIntoUncompressedFrame(
+                            spliced, sectionCount, patchPayload);
+                } else {
+                    spliced[24 + (secIdx << 1)] = (byte) ((newEntry16 >>> 8) & 0xFF);
+                    spliced[24 + (secIdx << 1) + 1] = (byte) (newEntry16 & 0xFF);
+                    workingFrame = spliced;
+                }
+            }
+
+            byte[] finalPayload = writeModeBZstd
+                    ? LcaSectionCodec.encodeModeBChunkFrameWithUncompressedHeader(
+                            workingFrame, sectionDirEnd, Math.max(1, zstdLevel))
+                    : workingFrame;
+            return commitPreEncodedChunkCoW(rx, rz, finalPayload);
+        }
+
         private void patchChunkFrameSelfTag(byte[] payload, int chunkIdx) {
             int rawDvWord = LcaSectionCodec.readIntBE(payload, 0);
             if ((rawDvWord & LcaRegionReader.CHUNK_FRAME_SELF_TAG_MASK) != LcaRegionReader.CHUNK_FRAME_SELF_TAG_MAGIC) {
@@ -2359,7 +2636,7 @@ public final class LcaRegionWriter {
             List<Object> lowBoundarySections = null;
             List<Object> highBoundarySections = null;
 
-            @SuppressWarnings("unchecked")
+            @SuppressWarnings({"unchecked", "rawtypes"})
             Map<String, Object>[] sectionByIdx = new Map[sectionCount];
             int[][] sectionBiomeIds = new int[sectionCount][];
             long[][] sectionBiomeData = new long[sectionCount][];

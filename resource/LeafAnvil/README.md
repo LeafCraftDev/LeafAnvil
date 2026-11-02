@@ -88,227 +88,20 @@ no-permission: "[LeafAnvil] You do not have permission to execute this command."
 
 ---
 
-## `.lca` (LeafCraft Anvil) Data Format Specification (`anvil-api-ADR-003` & [`api/anvil-api/docs/ICD.md`](../../api/anvil-api/docs/ICD.md))
+## `.lca` (LeafCraft Anvil) Data Format Specification ([`api/anvil-api/docs/ICD.md`](../../api/anvil-api/docs/ICD.md))
 
-> **Bundled & Public Interface Control Document (`ICD.md`, MIT):** The byte-level Interface Control Document ([`api/anvil-api/docs/ICD.md`](../../api/anvil-api/docs/ICD.md), also mirrored at [`docs/ICD.md`](docs/ICD.md), containing all bitfields, curve equations, checksum/Hamming formulas, and the 160-block / 65-biome / 128-property static lookup tables) is published under the MIT License in `api/anvil-api/docs/ICD.md`, packaged inside `LeafAnvil-<version>.jar` (`docs/ICD.md` and `META-INF/leafanvil/ICD.md`), and extracted to `<plugin-or-mod-config-dir>/ICD.md` on server startup.
+> **Single Canonical Specification (`api/anvil-api/docs/ICD.md`, MIT):** The byte-level Interface Control Document (**[`api/anvil-api/docs/ICD.md`](../../api/anvil-api/docs/ICD.md)**, `LCA-ICD-1.0`, routed from [`docs/ICD.md`](docs/ICD.md)) is the single canonical source of truth for all `.lca` header layouts, bitfields, 3D space-filling curve equations, `ChunkPatchTail` (`0x4000`) delta framing, checksum/Hamming parity formulas, and the `160`-block / `65`-biome / `128`-property static lookup tables. It is licensed under the MIT License, packaged inside `LeafAnvil-<version>.jar` (`docs/ICD.md` and `META-INF/leafanvil/ICD.md`), and extracted to `<plugin-or-mod-config-dir>/ICD.md` on server startup.
 
-Defined in `api/anvil-api` (`io.github.dailystruggle.anvil.LcaRegionReader`, `LcaRegionWriter`, `LcaSectionCodec`, `LcaRegionFileStorage`, and [`anvil-api-ADR-003`](../../api/anvil-api/docs/adr/anvil-api-ADR-003-hilbert-roaring-gray-chunk-archive.md)), `.lca` (LeafCraft Anvil) stores region data in `256-byte` Copy-on-Write (`CoW`) sub-slabs using either `Mode A` (`0-LZ` uncompressed section containers) or `Mode B` (per-chunk `Zstd-1`).
+Defined in `api/anvil-api` (`io.github.dailystruggle.anvil.LcaRegionReader`, `LcaRegionWriter`, `LcaSectionCodec`, `LcaRegionFileStorage`, and [`anvil-api-ADR-003`](../../api/anvil-api/docs/adr/anvil-api-ADR-003-hilbert-roaring-gray-chunk-archive.md)), `.lca` (LeafCraft Anvil) stores region data in `256-byte` Copy-on-Write (`CoW`) sub-slabs using either `Mode A` (`0-LZ` uncompressed section containers) or `Mode B` (uncompressed header + `SEC-DED` parity + per-chunk `Zstd-1` body).
 
-All multi-byte integers in header and directory structures are **big-endian (`BE`)** (`MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.BIG_ENDIAN)`).
-
-### 1. File Layout Overview (`r.<rx>.<rz>.lca`)
-
-```
-+-----------------------------------------------------------------------+ Offset 0x0000
-| 1. Superblock Header (64 bytes)                                       |
-+-----------------------------------------------------------------------+ Offset 0x0040
-| 2. Atomic Chunk Pointer Directory: uint64[1024] (8,192 bytes)         |
-+-----------------------------------------------------------------------+ Offset 0x2040
-| 3. Region Shared BlockState & Biome String Dictionary (Variable)      |
-+-----------------------------------------------------------------------+ Offset dictEnd
-| 4. Extended Hamming (72, 64) SEC-DED Syndrome Table (1,024 bytes)     |
-|    + Optional Front-Loaded LeafMap / RTP Multi-Span Analytical Header |
-+-----------------------------------------------------------------------+ Offset slabBase (256B-aligned)
-| 5. 256-Byte Sub-Slab Pool: Chunk Frames & Chained Dict Continuations  |
-+-----------------------------------------------------------------------+ Offset fileLength - 8
-| 6. Footer Canary Magic: uint64 (0x4C4341315F454E44 = "LCA1_END")      |
-+-----------------------------------------------------------------------+ Offset fileLength
-```
-
-### 2. Layer 1: Superblock (`64 Bytes`), Atomic Chunk Pointer Directory (`8,192 Bytes`) & `256B` CoW Slab Allocator
-
-#### 2.1 Superblock Header (`0x0000 .. 0x003F`, 64 Bytes)
-| Byte Offset | Type | Field Name | Description / Invariant |
-| ---: | :--- | :--- | :--- |
-| `0x00..0x07` | `uint64` | `magic` | `0x4C43415F56303031L` (`"LCA_V001"` ASCII) |
-| `0x08..0x09` | `uint16` | `formatVersion` | `0x0001` (Major `1`, Minor `0`) |
-| `0x0A` | `uint8` | `storageKind` | `0 = REGION_VOXEL` (`region/`), `1 = ENTITIES` (`entities/`), `2 = POI` (`poi/`), `3 = LEAFMAP_TILE` |
-| `0x0B` | `uint8` | `flags` | Bit `0`: `HAS_SHARED_DICT`; Bit `1`: `HAS_LEAFMAP_LOD_HEADER`; Bit `2`: `HAS_TAIL_DELTA_RING`; Bit `3`: `DEFAULT_ZSTD1`; Bit `4`: `HAS_SECDED_PARITY` |
-| `0x0C..0x0F` | `int32` | `regionX` | Region $X$ coordinate ($\lfloor \text{chunkX} / 32 \rfloor$) |
-| `0x10..0x13` | `int32` | `regionZ` | Region $Z$ coordinate ($\lfloor \text{chunkZ} / 32 \rfloor$) |
-| `0x14..0x17` | `int32` | `minSectionY` | World minimum section $Y$ (e.g. `-4` for $Y = -64$) |
-| `0x18..0x19` | `uint16` | `sectionCount` | Vertical sections per chunk (e.g. `24` for $Y = -64..319$, `1..128`) |
-| `0x1A..0x1B` | `uint16` | `slabShift` | Sub-slab alignment shift: `8` ($2^8 = 256\text{ bytes}$) |
-| `0x1C..0x1F` | `int32` | `defaultDataVersion` | Mojang `DataVersion` (e.g. `3953` for 1.21, `4671` for 26.1) |
-| `0x20..0x27` | `uint64` | `dictOffsetAndLen` | High 32 bits: root `dictCapacityBytes` (`256B`-aligned slack arena, default `1,024 B`); Low 32 bits: `dictByteOffset` (`0x2040`) |
-| `0x28..0x2F` | `uint64` | `lodHeaderOffsetAndLen` | High 32 bits: `secDedAndLodByteLength` (`>= 1,024 B` Extended Hamming `(72, 64)` SEC-DED pointer syndrome table); Low 32 bits: `secDedTableByteOffset` |
-| `0x30..0x37` | `uint64` | `slabPoolBaseOffset` | `256`-byte aligned start offset of the chunk sub-slab pool |
-| `0x38..0x3F` | `uint64` | `headerChecksum` | 64-bit SplitMix/XXH64 checksum (`LcaSectionCodec.computeSuperblockChecksum64`) over bytes `0x00..0x37` |
-
-#### 2.2 8 KiB Atomic Chunk Pointer Directory (`0x0040 .. 0x203F`, `uint64[1024]`)
-Indexed by `chunkIdx = (rx & 31) | ((rz & 31) << 5)`. Each 64-bit word is accessed with `VarHandle` volatile/fence semantics:
-
-$$\underbrace{\mathtt{slabOffset35}}_{\text{bits } 63..29} \;\big|\; \underbrace{\mathtt{codec1}}_{\text{bit } 28} \;\big|\; \underbrace{\mathtt{exactByteLen20}}_{\text{bits } 27..8} \;\big|\; \underbrace{\mathtt{generation8}}_{\text{bits } 7..0}$$
-
-- **`slabOffset35` (bits `63..29`, 35 bits):** Starting file offset in `256-byte` sub-slabs (`actualByteOffset = slabOffset35 << 8`), addressing up to $8\text{ TiB}$ per region file (`0` = ungenerated/absent chunk).
-- **`codec1` (bit `28`, 1 bit):** `0 = Mode A (Pure 0-LZ Direct Walk)`, `1 = Mode B (Per-Chunk Zstd-1 Frame Wrapper)`.
-- **`exactByteLen20` (bits `27..8`, 20 bits):** Exact payload byte length ($1\text{ B} .. 1,048,574\text{ B}$). Allocated slab count is `allocatedSlabs = (exactByteLen20 + 255) >>> 8`. Value `0xFFFFF` indicates an oversized chunk whose 64-bit length is stored in the first 8 bytes of the target slab (eliminating external `c.x.z.mcc` files).
-- **`generation8` (bits `7..0`, 8 bits):** Monotonically incrementing wrapping save counter (`0..255`), acting as an ABA concurrency guard and an $O(1)$ cache-invalidation / dirty-chunk diff token (`LcaRegionReader.readGenerationToken`).
-
-#### 2.3 In-Memory `256B` Free-Slab Allocator, 4-Epoch Copy-on-Write (`CoW`) Rotation & Hazard Pointers
-- On region open, `LcaLiveArchive` scans the `1,024` pointer words and chained dictionary continuation segments in `< 15 us`, populates a size-indexed free-slab `TreeMap`, and reserves `CoW` grace headroom slabs before the trailing `"LCA1_END"` canary.
-- On live chunk save (`saveChunkCoW`), the writer never overwrites an active chunk slab in place. Instead, it reclaims unpinned slabs from the 4-epoch `CoW` grace ring after checking the 64-slot lock-free reader hazard-pointer table (`PINNED_SLAB_STARTS` in `LcaRegionReader`), allocates a best-fit unpinned free interval $\ge \mathtt{newSlabs}$, writes the new chunk frame, issues a `VarHandle.releaseFence()`, updates the 1-byte Extended Hamming `(72, 64)` SEC-DED syndrome at `secDedTableOffset + chunkIdx`, atomically publishes the new 64-bit pointer word, and records the previous pointer in `prevChunkPointers[chunkIdx]` for $O(1)$ rollback.
-
----
-
-### 3. Layer 2: Dynamically Chained Shared Dictionary & Analytical Header
-
-#### 3.1 Dynamically Shape-Able Region Shared `BlockState` & `Biome` Dictionary (`0x2040`)
-```
-uint32  segmentStateCount          // Number of BlockState entries in this segment
-uint16  segmentBiomeCount          // Number of Biome entries in this segment
-uint16  usedPayloadBytes           // Exact active entry bytes written in this segment
-Entry[segmentStateCount]:
-  VarInt  utf8ByteLen
-  byte[]  canonicalStateString     // e.g. "minecraft:oak_stairs[facing=north,half=bottom,waterlogged=false]"
-  uint32  leafMapMaterialPacked    // RGBA8 albedo + 4-bit roughness/emissive/foliage/water flags
-BiomeEntry[segmentBiomeCount]:
-  VarInt  utf8ByteLen
-  byte[]  biomeIdString            // e.g. "minecraft:lush_caves"
-  uint32  foliageAndWaterTint      // Biome tint colors for LeafMap rendering
-byte[]  slackPadding               // Zero-filled slack up to (segmentCapacityBytes - 8)
-uint64  nextSegmentLinkTrailer     // ALWAYS at the last 8 bytes of the segment (offset + segmentCapacityBytes - 8)
-```
-- **Relative Continuation Trailer (`nextSegmentLinkTrailer`):** The last 8 bytes of every dictionary segment encode:
-  $$\underbrace{\mathtt{nextSegmentRelSlabs32}}_{\text{bits } 63..32\text{ (int32)}} \;\big|\; \underbrace{\mathtt{nextSegmentCapacitySlabs24}}_{\text{bits } 31..8\text{ (uint24)}} \;\big|\; \underbrace{\mathtt{segmentFlags8}}_{\text{bits } 7..0}$$
-  When a segment's slack is exhausted, the writer allocates a new `256B`-aligned continuation segment from the `TreeMap` slab pool and links it via `nextSegmentRelSlabs32` (`0` = terminal segment), preserving monotonic global dictionary IDs without shifting `slabPoolBaseOffset`.
-
----
-
-### 4. Layer 3: Self-Describing Chunk Frame, Slab-Local Micro-Palette, `uint16[N]` Section Directory & Residual Tail
-
-At `byteOffset = slabOffset35 << 8`:
-
-```
-+-----------------------------------------------------------------------+
-| int32   selfTagAndDataVersion (4 bytes: 0x5800_0000 | (chunkIdx << 16)|
-|                                         | (chunkDataVersion & 0xFFFF))|
-| int64   lastUpdateTick        (8 bytes; world LastUpdate)             |
-| int64   inhabitedTimeTicks    (8 bytes; world InhabitedTime)          |
-| uint8   chunkStatusOrdinal    (1 byte; 0xFF = full, 0xFE = empty,     |
-|                                        0xEF = custom string in NBT)   |
-| uint8   chunkFlags            (1 byte; bit 0: hasResidualNbt,         |
-|                                        bit 1: hasSlabLocalPalette,    |
-|                                        bit 2: scaleOffsets [0=1B,1=4B]|
-|                                        bits 7..3: defaultBiomeCode5)  |
-| uint16  residualNbtRelOffset  (2 bytes; offset in 1B/4B units to tail)|
-| uint16  sectionOffsets[sectionCount] (2 * sectionCount bytes)         |
-+-----------------------------------------------------------------------+
-| Slab-Local Chunk Micro-Palette (when chunkFlags bit 1 == 1)           |
-|   Part A: 1-byte Static Core Block/Biome Tokens + 4x4x4 BiomeTemplates|
-|   Part B: Sparse '[...]' Property Suffix Tokens / Global Dict VarInts |
-+-----------------------------------------------------------------------+
-| Non-Uniform Section Frames (for sections with sectionOffsets[i] > 0   |
-|                             and bit 15 == 0)                          |
-+-----------------------------------------------------------------------+
-| Residual Section & Non-Voxel Tail (when chunkFlags bit 0 == 1)        |
-|   uint16 boilerplateFlags16 + [bit 13: VarInt mbnlLen + mbnlStream]   |
-|   + Secondary Heightmap Cross-Deltas + Optional Residual CompoundTag  |
-+-----------------------------------------------------------------------+
-```
-
-#### 4.1 `uint16 sectionOffsets[i]` (`Y = minSectionY + i`)
-- **`0x0000`:** Unallocated / void section (`palette = [minecraft:air]`). Decodes in `0.03 us` with `0` body bytes.
-- **Bit `15 == 1` (`0x8000 | (skyLight2 << 13) | (biomeTemplate2 << 11) | localDictId11`, or `0x8000 | (skyLight2 << 13) | dictId13`):** **Inline Uniform Section (`|P| = 1`)** (`0` body bytes in section payload).
-  - `skyLight2` (`bits 14..13`): `00` = `(Sky=0, Block=0)`, `01` = `(Sky=15, Block=0)`, `10` = `(Sky=15, Block=15)`, `11` = `(Sky=0, Block=15)`.
-  - When `hasSlabLocalPalette == 1`, `bits 12..11` select one of the chunk's top 4 deduplicated $4 \times 4 \times 4$ `BiomeTemplate`s (`0..3`) and `bits 10..0` store `localDictId11` (`0..2,047`).
-- **Bit `15 == 0` (`0x0001 .. 0x7FFF`):** 1-based relative offset from `sectionDirEnd = 24 + 2 * sectionCount` to the non-uniform `SectionFrame`, scaled by `1 byte` (`scaleOffsets == 0`, up to `32 KiB`) or `4 bytes` (`scaleOffsets == 1`, up to `128 KiB`).
-
-#### 4.2 Slab-Local Chunk Micro-Palette (`chunkFlags` bit `1`)
-- **Part A (Base Block Names, Biomes & Deduplicated Chunk `BiomeTemplate`s):**
-  - Encodes common vanilla terrain blocks via the **160-entry Static Core Block Table** (`0x80 | coreId` for `0..127`, `0x60 | (coreId - 128)` for `128..159`, 1 byte) and **65-entry Static Core Biome Table** (`0x80 | coreBiomeId`, 1 byte). Non-core `minecraft:` names use tag `0x40` (stripped namespace + `VarInt` length + UTF-8); modded namespaces use tag `0x00`.
-  - Stores the chunk's deduplicated $4 \times 4 \times 4$ `BiomeTemplate`s (`VarInt tmplCount` + `11:XZY` column-run streams).
-  - `readChunkView`, `readColumnProbe`, `readTerrainProbe`, and `readSection` stop at the end of Part A in $O(1)$ without reading Part B or the region dictionary.
-- **Part B (Property Suffixes for Full-NBT `readChunk`):**
-  - Stores `VarInt propStateCount` followed by `(VarInt localStateIdx, propToken)` pairs for states containing `[...]` properties: either **`0x80 | propId` (1 byte)** indexing the **128-entry Static Core Property Suffix Table** (`STATIC_CORE_PROP_SUFFIXES`) or **`0x40` + `VarInt globalStateId`** referencing the Region Shared Dictionary at `0x2040`.
-
-#### 4.3 Residual Tail (`boilerplateFlags16` & `MOTION_BLOCKING_NO_LEAVES` Stream)
-At `residualRelStart = sectionDirEnd + (residualNbtRelOffset << unitShift)`:
-1. **`uint16 boilerplateFlags16`:**
-   - Bit `0` (`1`): Empty `block_entities` list
-   - Bit `1` (`2`): Empty `block_ticks` list
-   - Bit `2` (`4`): Empty `fluid_ticks` list
-   - Bit `3` (`8`): `isLightOn = (byte) 1`
-   - Bit `4` (`16`): Empty vanilla `structures` (`References` & `Starts`)
-   - Bit `5` (`32`): `PostProcessing` is `uint8 ppEmptyCount` empty `TAG_Short` lists
-   - Bit `6` (`64`): `starlight.light_version` (`VarInt`)
-   - Bit `7` (`128`): Compact uniform `lowBoundaryFlags` (`uint8`) section at `minSectionY - 1`
-   - Bit `8` (`256`): Compact uniform `highBoundaryFlags` (`uint8`) section at `minSectionY + sectionCount`
-   - Bit `9` (`512`): Binary secondary heightmaps (`uint8 count`, 1-byte standard heightmap code `0..5` or `0xFF` + UTF-8 key, `VarInt payLen`, and payload: `0xFE, dupIdx` for exact match, `0xFD, refIdx, numLongs, ...` for cross-heightmap zero-run RLE + ZigZag delta against the best prior heightmap, or standalone delta RLE)
-   - Bit `10` (`1024`): Trailing binary `Nbt` `TAG_Compound` slice present
-   - Bit `11` (`2048`): Non-voxel storage payload (`entities/` `storageKind = 1` or `poi/` `storageKind = 2`; omits synthetic voxel `sections`, `xPos`, `yPos`, `zPos`, `Status` keys)
-   - Bit `12` (`4096`): Trailing binary `Nbt` `TAG_Compound` slice is `DEFLATE`-compressed (`Deflater.BEST_SPEED`, applied automatically in `Mode A` when residual NBT $\ge 256\text{ B}$ and shrinks; skipped in `Mode B` so `Zstd-1` compresses the entire `ChunkFrame` body in a single pass)
-   - Bit `13` (`8192`): `VarInt mbnlByteLen` + `mbnlStream` (zero-run RLE `0x80 | (runLen - 1)` + ZigZag delta stream encoding the 256-column 9-bit `MOTION_BLOCKING_NO_LEAVES` heightmap, decoded in `< 0.5 us` without NBT parsing)
-
----
-
-### 5. Layer 4: $16 \times 16 \times 16$ Section Frame Layout (`LcaSectionCodec`)
-
-```
-+-----------------------------------------------------------------------+
-| uint8   sectionHeader                                                 |
-|         bits 7..6: blockCurveSelector (00=YZX, 01=H_3, 10=Y+H_2, 11=XZY)
-|         bits 5..4: blockEncodingMode  (00=Uniform [mask=0L elided],   |
-|                                        01=DeltaRoaring [8B mask],     |
-|                                        10=FlatBitPack_ADR072 [8B],    |
-|                                        11=DeltaRoaringFullMask        |
-|                                           [mask=-1L elided])          |
-|         bits 3..2: skyLightMode       (00=Absent,  01=ConstNibble,    |
-|                                        10=GrayBitplanes_YH2, 11=Raw)  |
-|         bits 1..0: blockLightMode     (00=Absent,  01=ConstNibble,    |
-|                                        10=GrayBitplanes_H3,  11=Raw)  |
-+-----------------------------------------------------------------------+
-| [If blockEncodingMode == 01 || blockEncodingMode == 10]:              |
-| uint64  octreeOccupancyMask64 (8 bytes; 1 bit per 4x4x4 octant in H_3 |
-|         order: bit k = 1 iff octant k contains any state != palette[0]|
-|         Elided when mode == 00 -> 0L, or mode == 11 -> -1L)           |
-+-----------------------------------------------------------------------+
-| VarInt  paletteLen (|P|)                                              |
-| VarInt  slabOrRegionDictIds[|P|] (Frequency-sorted: palette[0] is the |
-|                                   dominant state, 90.8%, NEVER stored)|
-+-----------------------------------------------------------------------+
-| BlockState Payload (Mode 01 or 11: |P|-1 Delta-Roaring containers; or |
-|                     Mode 10: flat bit-packed YZX array ceiling)       |
-+-----------------------------------------------------------------------+
-| Biome 4x4x4 Payload (0x80 | templateIdx6 referencing chunk template,  |
-|                      0x00 inheriting chunkDefaultBiome, or XZY RLE)   |
-+-----------------------------------------------------------------------+
-| [If skyLightMode == 01 || blockLightMode == 01:                       |
-|   uint8 constLightNibbles ((blkConst4 << 4) | skyConst4, 1 byte)]     |
-| SkyLight Payload (0B if Absent/Const, uint8 planeModes8 + 4 Gray      |
-|                   bitplanes in Y+H_2, or 2,048B raw nibble fallback)  |
-| BlockLight Payload (0B if Absent/Const, uint8 planeModes8 + 4 Gray    |
-|                     bitplanes in H_3, or 2,048B raw nibble fallback)  |
-+-----------------------------------------------------------------------+
-```
-
-- **1-Pass Directional Gradient Curve Predictor (`< 150 ns`):** Samples $8 \times 8 \times 8 = 512$ stride-2 points across minority voxels (`cur != dominantOldIdx`): selects `11:XZY` when `sameY > sameX && sameY > sameZ`, `00:YZX` or `10:Y+H_2` when `sameX + sameZ >= sameY`, and `01:H_3` (3D Hilbert octree curve) otherwise.
-- **Per-State Delta-Roaring Containers (`p = 1 .. |P|-1`, single-pass $O(4096)$):**
-  - `00 = TAG_SINGLETON` (`2 bytes`: `0x0000 | h12`) when state $p$ occurs once.
-  - `01 = TAG_DELTA_RUN` (`2-byte` header + adaptive `4|4` or `6|2` packed `adjGap | (len - 1)` stream with bounded-`240` escape bytes).
-  - `10 = TAG_DELTA_ARRAY` (`2-byte` header + bounded-`240` `adjGap` stream when all occurrences are isolated single voxels, `totalVoxels == runCount`).
-  - `11 = TAG_BITMAP` (`2-byte` header + `512-byte` raw 4,096-bit mask when run encoding would exceed `514 B`).
-- **Flat Bit-Packed Ceiling (`blockEncodingMode = 10`, `leafrtp-ADR-072`):** If total minority container bytes exceed `flatBytes = (4096 * ceil(log2(|P|)) + 7) >>> 3`, emits the exact `flatBytes` bit-packed array in `YZX` order so dense builds never bloat.
-- **Physics-Matched 4-Bitplane Gray-Code Lighting:** Maps each 4-bit light nibble $L \in [0, 15]$ to Reflected Binary Gray code $G = L \oplus (L \gg 1)$ across 4 bitplanes (`plane = 0..3`, with all four 2-bit plane mode tags packed into a single leading byte `planeModes8 = m0 | (m1 << 2) | (m2 << 4) | (m3 << 6)`, where each 2-bit tag is `0 = All-0`, `1 = All-1`, `2 = 4|4 Delta-Run Stream`, or `3 = 512B Bitmap`) traversed along `10:Y+H_2` for `SkyLight` and `01:H_3` for `BlockLight`.
-
----
-
-### 6. Built-In Testing (`PBIT` / `CBIT T1..T8`) & 4-Tier Bit-Rot Self-Healing
-
-- **Continuous Built-In Test Tripwires (`CBIT T1..T8`):**
-  - `T1`: Superblock magic `"LCA_V001"`, footer canary `"LCA1_END"`, `formatVersion == 0x0001`, and `slabShift == 8`.
-  - `T2`: 64-bit `headerChecksum` verification over bytes `0x00..0x37`.
-  - `T3` & `T3b`: Pointer bounds `(slabOffset35 << 8) + exactByteLen20 <= fileLength - 8` and self-describing `ChunkFrame` canary `(rawDvWord & 0xFC00_0000) == 0x5800_0000` with embedded `((rawDvWord >>> 16) & 0x03FF) == chunkIdx`.
-  - `T4`: Per-chunk uncompressed allocation ceiling (`<= 16 MiB`).
-  - `T5`: `sectionOffsets[i]` bounds and acyclic chained dictionary traversal (`<= 64` segments).
-  - `T6` & `T6b`: Delta-Roaring cursor bound ($h \le 4,096$) and 64-bit spatial syndrome check (`decodedOctreeMask64 == octreeOccupancyMask64`).
-  - `T7`: `VarInt` palette index bounds (`< stateCount`).
-  - `T8`: Hazard-pointer pinning (`PINNED_SLAB_STARTS`) + `ptrBefore == ptrAfter` load-fence tear-free snapshot verification.
-- **4-Tier Bit-Rot Self-Healing (`/leafanvil heal`, `LcaRegionReader.healRegionBitRot`):**
-  1. **Tier 1 - Extended Hamming `(72, 64)` SEC-DED Pointer Healing (`< 10 ns`):** Repairs any 1-bit flip in a 64-bit chunk pointer in $O(1)$ (`LcaSectionCodec.healSingleBitFlip64`) and flags 2-bit errors (`DED`) for Tier 2.
-  2. **Tier 2 - Self-Describing `256B` Slab Reverse-Scan:** Scans `256B` sub-slabs from `slabPoolBaseOffset` to `fileLength - 8` for `0x5800_0000 | (chunkIdx << 16)` to reconstruct zeroed or multi-bit corrupted directory pointers and SEC-DED syndrome bytes.
-  3. **Tier 3 - Section-Granular `octreeOccupancyMask64` Spatial Syndrome & `palette[0]` Quarantine:** Isolates interior container bit rot to the single affected $16^3$ section, substituting its dominant stratum `palette[0]` (`90.8%` of voxels) while keeping the other 23 vertical sections of the chunk intact.
-  4. **Tier 4 - Copy-on-Write (`CoW`) Prior-Generation Pointer Rollback:** `LcaLiveArchive#rollbackCorruptChunkToPriorCoW` restores `prevChunkPointers[chunkIdx]` in $O(1)$ if an interrupted write is detected.
+| Layer / Mechanism | Summary | Canonical Spec Section in [`api/anvil-api/docs/ICD.md`](../../api/anvil-api/docs/ICD.md) |
+| :--- | :--- | :--- |
+| **Layer 1: Superblock (`64 B`), Pointer Directory (`8 KiB`) & `SEC-DED` Table (`1 KiB`)** | `"LCA_V001"` superblock with 64-bit SplitMix checksum (`CBIT T2`), `uint64[1024]` lock-free pointer directory (`slabOffset35 \| codec1 \| exactByteLen20 \| generation8`), `256B` CoW free-slab allocator with 64-slot reader hazard pointers, and `1,024 B` Extended Hamming `(72, 64)` `SEC-DED` pointer syndromes. | [`Section 3`](../../api/anvil-api/docs/ICD.md#3-top-level-file-layout-rrxrzlca) & [`Section 4`](../../api/anvil-api/docs/ICD.md#4-layer-1-superblock-64-b-pointer-directory-8192-b--sec-ded-table-1024-b) |
+| **Layer 2: Chained Region Shared Dictionary (`0x2040`)** | Pre-allocated `256B`-aligned dictionary arena with `nextSegmentLinkTrailer` relative continuation pointers (`<= 64` segments, `CBIT T5`) and packed `RGBA8` material/tint metadata for map LODs. | [`Section 5`](../../api/anvil-api/docs/ICD.md#5-layer-2-chained-region-shared-dictionary-0x2040) |
+| **Layer 3a/b: Self-Describing `ChunkFrame`, Order-Independent `sectionOffsets[N]` & Slab-Local Micro-Palette** | Uncompressed `ChunkFrame` header (`0x5800_0000 \| (chunkIdx << 16) \| DataVersion`), `Mode B` header `SEC-DED` + `Zstd-1` body wrapper, $O(1)$ inline uniform sections (`bit 15 == 1`, `0` body bytes), order-independent non-overlapping `SectionFrame` offsets (`relEnd_i`), and two-part Slab-Local Micro-Palette (`Part A` 1-byte static core block/biome tokens + $4^3$ `BiomeTemplate`s; `Part B` sparse property suffixes). | [`Section 6`](../../api/anvil-api/docs/ICD.md#6-layer-3-self-describing-chunkframe-header-mode-b-wrapper--section-directory) & [`Section 9`](../../api/anvil-api/docs/ICD.md#9-static-core-lookup-tables-static_core_) |
+| **Layer 4: $16 \times 16 \times 16$ Non-Uniform `SectionFrame`** | 1-pass directional curve predictor (`00:YZX`, `01:H_3`, `10:Y+H_2`, `11:XZY`), 64-bit `octreeOccupancyMask64` (`CBIT T6b`), per-state Delta-Roaring containers (`TAG_SINGLETON`, `TAG_DELTA_RUN` `4\|4` or `6\|2`, `TAG_DELTA_ARRAY`, `TAG_BITMAP`), `FlatBitPack` ceiling, and 4-bitplane Reflected Binary Gray-code lighting (`SkyLight` on `Y+H_2`, `BlockLight` on `H_3`). | [`Section 7`](../../api/anvil-api/docs/ICD.md#7-layer-4-16-times-16-times-16-non-uniform-sectionframe-layout) |
+| **Layer 3c: Residual Tail, Heightmap Delta Streams & `ChunkPatchTail` (`0x4000`)** | `uint16 boilerplateFlags16` (`bits 0..14`) eliding empty vanilla/Starlight lists, binary RLE + ZigZag delta `MOTION_BLOCKING_NO_LEAVES` and cross-heightmap delta streams, length-prefixed `ChunkPatchTail` (`HAS_CHUNK_PATCH_TAIL = 0x4000` with appended micro-palette entries, per-section voxel/light deltas, replacement section offsets, and `patchParity8` `SEC-DED` syndrome), and optional trailing Mojang NBT up to `residualRelEnd`. | [`Section 8`](../../api/anvil-api/docs/ICD.md#8-layer-3c-residual-tail-motion_blocking_no_leaves--boilerplateflags16) |
+| **Built-In Testing (`CBIT T1..T8`) & 4-Tier Bit-Rot Recovery (`/leafanvil heal`)** | Tier 1 Hamming `(72, 64)` `SEC-DED` pointer & Mode B header healing (`< 10 ns`), Tier 2 self-describing `256B` slab reverse-scan (`0x5800_0000`), Tier 3 per-section `octreeOccupancyMask64` quarantine with `palette[0]` fallback, and Tier 4 4-epoch `CoW` prior-pointer rollback. | [`Section 10`](../../api/anvil-api/docs/ICD.md#10-reader--recovery-procedures) & [`BIT_CODES.md`](docs/dev/BIT_CODES.md) |
 
 ---
 
@@ -462,6 +255,40 @@ Cold-restart round-trip (`Boot #1` in-game block, container, and mob mutations -
 | :--- | ---: | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `fabric` | `767 / 0` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | **`PASS (6/6)`** |
 
+#### 4. `Chunky` (`1.5.3`) World Pre-Generation & Border-Scan Benchmark
+
+Measured on `bamboo` (Threadripper 7970X, cores `0-23,32-55`, `-Xms16G -Xmx16G`, fixed seed `8675309`) comparing `without-lca` (`.mca` / `.linear` / `.b_linear`), `with-lca` (`LeafAnvil` `.lca` `zstd-level: 0` Mode A), and `with-lca-b` (`LeafAnvil` `.lca` `zstd-level: 1` Mode B):
+
+**4A. Fresh-World Pre-Generation from Scratch (`/chunky radius 512`, `1,024 x 1,024` blocks, `4,225` `FULL` chunks / `8,627` total saved voxel chunks across `34` region files):**
+
+| Platform | Arm | Format | `Chunky` Gen Time (`s`) | Effective `CPS` (Peak `CPS`) | `ChunkHolderManager` Save (`s`, Chunks) | Server Stop (`s`) | End-to-End Gen + Save (`s`) | Disk Size (`MB` Raw / Compacted) |
+| :--- | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `paper` (`26.2`) | `without-lca` | `.mca` (`Zlib`) | `92.82 s` | `45.5 cps` (`61.0`) | `7.07 s` (`649`) | `9.41 s` | `102.23 s` | `57.59 MB` |
+| `paper` (`26.2`) | `with-lca` | `.lca` (`zstd=0`) | **`10.01 s` (`9.3x`)** | **`422.1 cps` (`425.3`)** | **`0.04 s` (`1,435`, `177x`)** | **`2.20 s` (`4.3x`)** | **`12.21 s` (`8.4x`)** | **`29.66 / 29.11 MB` (`-49.5%`)** |
+| `paper` (`26.2`) | `with-lca-b` | `.lca` (`zstd=1`) | **`10.26 s` (`9.0x`)** | **`411.8 cps` (`412.0`)** | **`0.04 s` (`1,301`, `177x`)** | **`2.40 s` (`3.9x`)** | **`12.66 s` (`8.1x`)** | **`24.92 / 24.47 MB` (`-57.5%`)** |
+| `folia` (`26.2`) | `without-lca` | `.mca` (`Zlib`) | `103.36 s` | `40.9 cps` (`51.2`) | `7.37 s` (`1,286`) | `9.62 s` | `112.98 s` | `57.56 MB` |
+| `folia` (`26.2`) | `with-lca` | `.lca` (`zstd=0`) | **`20.11 s` (`5.1x`)** | **`210.1 cps` (`213.2`)** | **`0.04 s` (`1,286`, `184x`)** | **`2.09 s` (`4.6x`)** | **`22.20 s` (`5.1x`)** | **`30.04 / 29.28 MB` (`-49.1%`)** |
+| `folia` (`26.2`) | `with-lca-b` | `.lca` (`zstd=1`) | **`20.36 s` (`5.1x`)** | **`207.5 cps` (`212.0`)** | **`0.04 s` (`1,504`, `184x`)** | **`2.10 s` (`4.6x`)** | **`22.46 s` (`5.0x`)** | **`25.16 / 24.58 MB` (`-57.3%`)** |
+| `leaf-linear` (`26.2`) | `without-lca` | `.linear` (`LINEAR_V2`) | `48.29 s` | `87.5 cps` (`194.8`) | `2.42 s` (`1,076`) | `4.42 s` | `52.71 s` | `31.12 MB` |
+| `leaf-linear` (`26.2`) | `with-lca-b` | `.lca` (`zstd=1`) | **`10.26 s` (`4.7x`)** | **`411.8 cps` (`411.8`)** | **`0.06 s` (`1,660`, `40x`)** | **`2.02 s` (`2.2x`)** | **`12.28 s` (`4.3x`)** | **`25.03 / 24.53 MB` (`-21.2%`)** |
+| `leaf-blinear` (`26.2`) | `without-lca` | `.b_linear` (`B_LINEAR`) | `10.26 s` | `411.8 cps` (`428.1`) | `0.06 s` (`1,304`) | `3.02 s` | `13.28 s` | `26.13 MB` |
+| `leaf-blinear` (`26.2`) | `with-lca-b` | `.lca` (`zstd=1`) | **`10.51 s` (`1.0x`)** | **`402.0 cps` (`413.3`)** | **`0.05 s` (`1,287`)** | **`2.22 s` (`1.36x`)** | **`12.73 s` (`1.04x`)** | **`25.00 / 24.52 MB` (`-6.2%`)** |
+
+**4B. Existing-World Border Scan (`/chunky radius 1024`, `2,048 x 2,048` blocks, `16,641` chunks over the `767`-region / `293,317`-chunk template):**
+
+| Platform | Arm | Format | `Chunky` Scan Time (`s`) | Effective `CPS` (Peak `CPS`) | `ChunkHolderManager` Save (`s`) | Server Stop (`s`) | Total Time (`s`) | Template Disk (`MB`) |
+| :--- | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `paper` (`26.2`) | `without-lca` | `.mca` (`Zlib`) | `2.01 s` | `8,279.1 cps` (`8,096.1`) | `0.49 s` | `2.60 s` | `4.61 s` | `2,527.92 MB` |
+| `paper` (`26.2`) | `with-lca` | `.lca` (`zstd=0`) | **`2.01 s`** | **`8,279.1 cps` (`9,084.8`)** | **`0.01 s`** | **`2.20 s`** | **`4.21 s`** | **`1,535.33 MB` (`-39.3%`)** |
+| `paper` (`26.2`) | `with-lca-b` | `.lca` (`zstd=1`) | **`2.01 s`** | **`8,279.1 cps` (`8,662.8`)** | **`0.01 s`** | **`2.20 s`** | **`4.21 s`** | **`1,269.86 MB` (`-49.8%`)** |
+| `folia` (`26.2`) | `without-lca` | `.mca` (`Zlib`) | `7.10 s` | `2,343.8 cps` (`8,213.5`) | `0.60 s` | `2.70 s` | `9.80 s` | `2,532.09 MB` |
+| `folia` (`26.2`) | `with-lca` | `.lca` (`zstd=0`) | **`2.10 s` (`3.4x`)** | **`7,924.3 cps` (`8,994.6`)** | **`0.12 s`** | **`2.22 s`** | **`4.32 s` (`2.3x`)** | **`1,535.73 MB` (`-39.4%`)** |
+| `folia` (`26.2`) | `with-lca-b` | `.lca` (`zstd=1`) | **`2.02 s` (`3.5x`)** | **`8,238.1 cps` (`8,893.3`)** | **`0.10 s`** | **`2.10 s`** | **`4.12 s` (`2.4x`)** | **`1,270.23 MB` (`-49.8%`)** |
+| `leaf-linear` (`26.2`) | `without-lca` | `.linear` (`LINEAR_V2`) | `4.51 s` | `3,689.8 cps` (`3,895.0`) | `0.04 s` | `2.22 s` | `6.73 s` | `1,672.15 MB` |
+| `leaf-linear` (`26.2`) | `with-lca-b` | `.lca` (`zstd=1`) | **`2.01 s` (`2.2x`)** | **`8,279.1 cps` (`8,917.5`)** | **`0.01 s`** | **`2.02 s`** | **`4.03 s` (`1.7x`)** | **`1,270.24 MB` (`-24.0%`)** |
+| `leaf-blinear` (`26.2`) | `without-lca` | `.b_linear` (`B_LINEAR`) | `5.01 s` | `3,321.6 cps` (`3,885.0`) | `0.01 s` | `2.42 s` | `7.43 s` | `1,407.56 MB` |
+| `leaf-blinear` (`26.2`) | `with-lca-b` | `.lca` (`zstd=1`) | **`2.01 s` (`2.5x`)** | **`8,279.1 cps` (`8,620.7`)** | **`0.01 s`** | **`2.22 s`** | **`4.23 s` (`1.8x`)** | **`1,270.24 MB` (`-9.8%`)** |
+
 ```bash
 # Run rotating A/B rounds across Paper, Folia, Fabric, and NeoForge (alternating arm order each round)
 python3 scripts/bench_lca_multiplatform.py --mode rotate --platforms paper,folia,fabric,neoforge
@@ -493,7 +320,7 @@ python3 scripts/bench_lca_multiplatform.py --stop
 
 ## Documentation (`resource/LeafAnvil/docs/` & `api/anvil-api/docs/`)
 
-- [**`.lca` Binary Interface Control Document (`api/anvil-api/docs/ICD.md`, MIT)**](../../api/anvil-api/docs/ICD.md) *(mirrored at [`docs/ICD.md`](docs/ICD.md), bundled in `LeafAnvil.jar` under `docs/ICD.md` and `META-INF/leafanvil/ICD.md`, and extracted to `<config-dir>/ICD.md`)*
+- [**`.lca` Binary Interface Control Document (`api/anvil-api/docs/ICD.md`, MIT)**](../../api/anvil-api/docs/ICD.md) *(single canonical specification, routed from [`docs/ICD.md`](docs/ICD.md), bundled in `LeafAnvil.jar` under `docs/ICD.md` and `META-INF/leafanvil/ICD.md`, and extracted to `<config-dir>/ICD.md`)*
 - [**Storefront Overview (`FRONT_PAGE.md`)**](docs/publishing/FRONT_PAGE.md)
 - [**Commands & Permissions Reference (`COMMANDS.md`)**](docs/admin/COMMANDS.md)
 - [**Configuration Reference (`CONFIGURATION.md`)**](docs/admin/CONFIGURATION.md)
@@ -508,4 +335,4 @@ python3 scripts/bench_lca_multiplatform.py --stop
 ## Licensing (`LeafAnvil` Commercial Carrier & Open `.lca` Format)
 
 - **`LeafAnvil` Runtime Plugin & Mod (`resource/LeafAnvil`, `net.leaf.anvil.*`):** Licensed under the [**LeafCraft Commercial Software License (`LicenseRef-LeafCraft-Commercial`)**](LICENSE) (packaged inside `LeafAnvil-<version>.jar` at `META-INF/leafanvil/LICENSE`). Grants a commercial server and network execution license to verified license holders while prohibiting redistribution or resale of the `LeafAnvil` JAR or bytecode.
-- **Open `.lca` Format Specification & `anvil-api` Interoperability (`MIT`):** The `.lca` binary format Interface Control Document ([`api/anvil-api/docs/ICD.md`](../../api/anvil-api/docs/ICD.md) / [`docs/ICD.md`](docs/ICD.md), `LCA-ICD-1.0`) and the `io.github.dailystruggle.anvil` codec API ([`api/anvil-api`](../../api/anvil-api/README.md)) remain openly licensed under the **MIT License**. Third-party world generators, server forks, map renderers, and backup utilities may freely inspect, implement, or reverse-engineer the `.lca` format and `anvil-api` to read, write, and interoperate with `.lca` world archives.
+- **Open `.lca` Format Specification & `anvil-api` Interoperability (`MIT`):** The `.lca` binary format Interface Control Document ([`api/anvil-api/docs/ICD.md`](../../api/anvil-api/docs/ICD.md), routed from [`docs/ICD.md`](docs/ICD.md), `LCA-ICD-1.0`) and the `io.github.dailystruggle.anvil` codec API ([`api/anvil-api`](../../api/anvil-api/README.md)) remain openly licensed under the **MIT License**. Third-party world generators, server forks, map renderers, and backup utilities may freely inspect, implement, or reverse-engineer the `.lca` format and `anvil-api` to read, write, and interoperate with `.lca` world archives.
