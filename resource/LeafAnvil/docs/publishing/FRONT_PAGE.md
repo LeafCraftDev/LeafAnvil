@@ -2,7 +2,7 @@
 Single source for every LeafAnvil storefront page (BuiltByBit, Modrinth, Hangar, SpigotMC).
 Follows docs/dev/RULES.md Rule D-006 (first-person plain voice, 3-Zone hierarchy,
 ASCII punctuation only, concrete benchmark numbers and honest caveats).
-  BuiltByBit Card Title: "LeafAnvil - 50% Smaller Worlds & 15x Faster Saves"
+  BuiltByBit Card Title: "LeafAnvil - 50% Smaller Worlds & 15.5x Faster Saves"
   BuiltByBit Card Thumbnail: docs/assets/leafanvil-card-thumbnail.png
   BuiltByBit Carousel Slides: docs/assets/leafanvil-card-thumbnail.png, docs/assets/leafanvil-benchmark-comparison.png, docs/assets/leafanvil-architecture-workflow.png
   Title: "LeafAnvil"  tagline: "Cut world disk & backup size by 50%, speed up server shutdown saves 15.5x, and self-heal chunk corruption on Paper, Folia, Fabric & NeoForge"
@@ -10,7 +10,9 @@ ASCII punctuation only, concrete benchmark numbers and honest caveats).
 
 <div align="center">
 
+<!-- not: bbb -->
 ![LeafAnvil: 50% smaller worlds, 15.5x faster shutdown saves, and 4-tier bit-rot self-healing](../assets/leafanvil-header-banner.png)
+<!-- /not -->
 
 # {{name}}: 50% Smaller Worlds, 15.5x Faster Saves & Self-Healing `.lca` Storage
 
@@ -22,42 +24,34 @@ ASCII punctuation only, concrete benchmark numbers and honest caveats).
 
 ## Storage
 
-**{{name}} is a drop-in `.lca` world storage plugin and mod for stock Paper, Folia, Spigot, Fabric, and NeoForge servers.** Drop the jar into `plugins/` or `mods/` and start the server. Existing `.mca`, `.linear`, and `.b_linear` (`BufferedLinear`) files across `region/`, `entities/`, and `poi/` convert automatically as chunks open while keeping `.bak` backups on disk.
+**{{name}} is a drop-in `.lca` world storage plugin and mod for Paper, Folia, Spigot, Fabric, and NeoForge.** Drop the jar into `plugins/` or `mods/` and start the server. Existing `.mca`, `.linear`, and `.b_linear` (`BufferedLinear`) files across `region/`, `entities/`, and `poi/` convert automatically as chunks open while keeping `.bak` backups on disk.
 
 It hooks `RegionFileStorage` in memory at startup, so `Chunky`, `WorldEdit` / `FAWE`, `C2ME`, `BlueMap`, `Dynmap`, `squaremap`, `CoreProtect`, and custom world generators work without changes, and [`LeafRTP`](https://github.com/DailyStruggle/RTP) reads `.lca` files directly.
 
-One jar covers Paper and Spigot (1.20+), Folia (1.21+), Fabric (26.1+), and NeoForge (26.1+). The runtime plugin/mod is commercial (`LicenseRef-LeafCraft-Commercial`), while the `.lca` binary specification ([`ICD.md`](../../../../api/anvil-api/docs/ICD.md)) and standalone Java codec ([`anvil-api`](../../../../api/anvil-api/README.md)) are open-source under the MIT License - your worlds are never locked in, and `/leafanvil convert` switches back to vanilla `.mca` at any time.
+One jar runs on Paper and Spigot (1.20+), Folia (1.21+), Fabric (26.1+), and NeoForge (26.1+). The server plugin/mod is commercial (`LicenseRef-LeafCraft-Commercial`), while the `.lca` binary specification ([`ICD.md`](../../../../api/anvil-api/docs/ICD.md)) and standalone Java codec ([`anvil-api`](../../../../api/anvil-api/README.md)) are MIT open-source.
 
 ![LeafAnvil 120-run benchmark summary across Paper, Folia, Leaf .linear, Leaf .b_linear, Fabric, and NeoForge](../assets/leafanvil-benchmark-comparison.png)
 
-### The short version
+### TL;DR
 
-**Cuts world and backup disk usage by `39.3% to 50.2%`, finishes server shutdown saves up to `15.5x` faster, avoids `.linear` / `.b_linear` random-read bucket stalls, self-heals bit rot across 4 tiers, and converts back to vanilla `.mca` in one command.**
+**`39.3% to 50.2%` smaller world files, up to `15.5x` faster shutdown saves, per-chunk reads and writes without `.linear` bucket stalls, 4-tier bit-rot recovery, and 1-command conversion back to `.mca`.**
 
 - [**Easy**](#install): drop `{{jar}}` into `plugins/` or `mods/` and start the server; existing `.mca`, `.linear`, and `.b_linear` regions migrate on open or in bulk via `/leafanvil convert`.
-- [**Safe**](#resilience-redundancy-and-4-tier-self-healing): keeps `.bak` backups during migration, writes modified chunks to fresh slabs before updating pointers, and repairs bit rot on the fly.
+- [**Safe**](#4-tier-bit-rot-recovery): keeps `.bak` backups during migration, writes modified chunks to fresh slabs before updating pointers, and repairs bit rot on the fly.
 - [**Half size**](#performance): shrinks `2,527.9 MB` `.mca` worlds to `1,269.8 MB` (`-49.8%` at default `zstd-level: 1`, or `1,257.7 MB` at `zstd-level: 6`), smaller than `.linear` (`1,672.1 MB`) and `.b_linear` (`1,407.5 MB`).
 - [**Fast saves**](#performance): `1.6x to 15.5x` faster world save on server stop (`5.5s` vs `86.1s` on Paper, `5.0s` vs `47.7s` on Folia) and `5.1x to 9.3x` faster `Chunky` pre-generation.
-- [**Reversible**](#features): run `/leafanvil convert world=all format=mca` to convert every `.lca` file back to vanilla `.mca`, or use the open-source MIT `anvil-api` codec offline.
+- [**Reversible**](#install): run `/leafanvil convert world=all format=mca` to convert every `.lca` file back to vanilla `.mca`, or use the open-source MIT `anvil-api` codec offline.
 - [**One jar**](#install): runs on stock Paper, Spigot, Folia, Fabric (`+ C2ME`), and NeoForge (`+ C2ME`).
 
 <details>
-<summary><b>More highlights</b></summary>
+<summary><b>Storage & format details</b></summary>
 
 - **All three dimension storage folders:** intercepts `region/` (terrain), `entities/` (mobs), and `poi/` (villager beds, job sites, portals) across Overworld, Nether, End, and custom dimensions.
 - **Configurable `zstd-level` (`1` default, `0` zero-LZ, `6` archival):** `zstd-level: 1` (`1,269.8 MB`, `-49.8%` vs `.mca`) balances size and speed, `zstd-level: 0` (`1,535.3 MB`, `-39.3%`) skips LZ decompression, and `zstd-level: 6` (`1,257.7 MB`, `-50.2%`) targets archival storage.
-- **4-tier bit-rot self-healing (`/leafanvil heal`):** combines Hamming `(72, 64)` pointer parity, self-describing `256B` slab headers, per-section occupancy checks, and Copy-on-Write rollback.
+- **4-tier bit-rot recovery (`/leafanvil heal`):** combines Hamming `(72, 64)` pointer parity, self-describing `256B` slab headers, per-section occupancy checks, and Copy-on-Write rollback.
 - **No external `.mcc` sidecar files:** chunks up to `16 MiB` stay inline inside the `256B` slab pool instead of spilling into `c.x.z.mcc` files.
 
 </details>
-
-## Common setups
-
-These work out of the box with the default `config.yml`:
-
-- **Shrink world disk and backups with zero downtime:** Drop `{{jar}}` into `plugins/` or `mods/`. Each `.mca`, `.linear`, or `.b_linear` file converts to `.lca` on first open and keeps the original as `.bak`.
-- **Convert an entire world at once (`/leafanvil convert`):** Run `/leafanvil convert world=all format=lca` after pre-generating with `Chunky` or `LeafRTP` to convert all dimensions on background threads.
-- **Revert to vanilla `.mca` before uninstalling:** Run `/leafanvil convert world=all format=mca`, wait for the console completion message, and remove `{{jar}}`.
 
 ---
 
@@ -67,17 +61,19 @@ These work out of the box with the default `config.yml`:
 
 1. Drop `{{jar}}` into `plugins/` (Paper, Spigot, Folia) or `mods/` (Fabric, NeoForge) and start the server.
 2. Run `/leafanvil status` (or `/lca status`) to check that `interceptedStorages` shows `3` per loaded dimension (`region/`, `entities/`, and `poi/`).
-3. **Optional:** Run `/leafanvil convert world=all format=lca` to convert existing files in the background, or let `auto-migrate-legacy: true` convert regions lazily as chunks open.
+3. **Optional:** Run `/leafanvil convert world=all format=lca` to convert existing files on background threads (for example right after `Chunky` pre-generation), or let `auto-migrate-legacy: true` convert regions as chunks open while keeping `.bak` backups.
+
+To switch back to vanilla `.mca` before uninstalling, run `/leafanvil convert world=all format=mca`, wait for the console completion message, and remove `{{jar}}`.
 
 ---
 
 ## Features
 
-- **Cut world & backup size by `-49.8%` (`-24.1%` vs `.linear`, `-9.8%` vs `.b_linear`):** packs single-block sections (`air`, `stone`, `deepslate` - `66.4%` of typical sections) into 2-byte directory entries (`0` body bytes) and replaces `4,096-byte` padded sectors with `256-byte` sub-slabs.
-- **Finish server-stop world saves up to `15.5x` faster (`5.5s` vs `86.1s`):** Copy-on-Write (`CoW`) `256-byte` sub-slab allocation writes modified chunks to fresh slabs without rewriting shared `Zstd` buckets.
-- **Drop-in `RegionFileStorage` interception:** hooks vanilla and Paper/Folia Moonrise `RegionFileStorage` caches (`region/`, `entities/`, `poi/`) at startup without requiring a custom server fork.
-- **Reversible `.lca <-> .mca` batch transcoder:** `/leafanvil convert [world=<name|all>] [format=<lca|mca>]` converts all dimension folders on background worker threads using atomic `.tmp` renames.
-- **Online slab compaction & 4-tier bit-rot healer:** `/leafanvil compact` defragments regions above `compact-fragmentation-threshold`, and `/leafanvil heal` repairs pointer bit flips, rebuilds wiped directories, and isolates damaged `16x16x16` sections.
+- **`256-byte` sub-slabs & inline uniform sections:** packs single-block sections (`air`, `stone`, `deepslate` - `66.4%` of typical sections) into 2-byte directory entries (`0` body bytes) and replaces `4,096-byte` padded sectors with `256-byte` sub-slabs.
+- **Copy-on-Write (`CoW`) saves:** writes modified chunks to fresh `256-byte` slabs without rewriting shared `Zstd` buckets or blocking active readers.
+- **Runtime `RegionFileStorage` hook:** intercepts vanilla and Paper/Folia Moonrise `RegionFileStorage` caches (`region/`, `entities/`, `poi/`) at startup without a custom server fork.
+- **Background `.lca <-> .mca` converter:** `/leafanvil convert [world=<name|all>] [format=<lca|mca>]` converts all dimension folders on worker threads using atomic `.tmp` renames.
+- **Online slab compaction & bit-rot repair:** `/leafanvil compact` defragments regions above `compact-fragmentation-threshold`, and `/leafanvil heal` repairs pointer bit flips, rebuilds wiped directories, and isolates damaged `16x16x16` sections.
 
 ---
 
@@ -98,7 +94,7 @@ Benchmarks cover 120 live server runs across 8 platform configurations and isola
 | **NeoForge `26.1.2`** (`5/5/5`, `n=5`) | **`1,569.6`** / **`1,298.5 MB`** vs `2,530.4 MB` (`-38.0%` / `-48.7%`) | **`1,486`** / **`1,494`** vs `1,493` (`1.00x`) | **`15 ms`** / **`21 ms`** vs `25 ms` (`16` / `21` vs `25 ms` cold, **`1.70x` / `1.19x` faster**) | **`42 ms`** (`21.2 ms`) / **`46 ms`** (`23.4 ms`) vs `47 ms` (`22.3 ms`, `1.12x` / `1.02x` faster) | **`1.56 ms`** (`78.8`) / **`1.58 ms`** (`79.5`) vs `1.57 ms` (`78.9`, `1.01x` / `0.99x`) | **`4.27 +- 0.10 s`** / **`4.72 +- 0.43 s`** vs `12.42 +- 0.89 s` (**`2.9x` / `2.6x` faster**) |
 | **NeoForge `26.1.2` + `C2ME`** (`5/5/5`, `n=5`) | **`1,578.7`** / **`1,305.1 MB`** vs `2,531.1 MB` (`-37.6%` / `-48.4%`) | **`1,494`** / **`1,496`** vs `1,496` (`1.00x`) | **`12 ms`** / **`16 ms`** vs `16 ms` (`13` / `17` vs `17 ms` cold, **`1.28x` / `0.95x`**) | **`42 ms`** (`18.2 ms`) / **`49 ms`** (`22.6 ms`) vs `54 ms` (`19.3 ms`, **`1.28x` / `1.10x` faster**) | **`1.17 ms`** (`79.3`) / **`1.18 ms`** (`79.2`) vs `1.18 ms` (`79.8`, `1.01x` / `1.00x`) | **`4.14 +- 0.34 s`** / **`4.09 +- 0.38 s`** vs `9.09 +- 0.32 s` (**`2.2x` faster**) |
 
-### Notes and trade-offs
+### Benchmark breakdown
 
 - **Disk and shutdown saves (`120` runs):** On the `293,317`-chunk template, `.lca` shrinks disk usage from `2,527.9 MB` (`.mca`), `1,672.1 MB` (`.linear`), and `1,407.5 MB` (`.b_linear`) to `1,535.3 MB` in Mode A (`zstd-level: 0`) and `1,269.8 MB` in Mode B (`zstd-level: 1`). Shutdown world saves finish in `3.93 to 5.55 s` across all 8 platforms (`15.5x` faster on Paper, `9.5x` on Folia, `10.7x` vs `.linear`).
 - **Random teleports vs `.linear` and `.b_linear`:** Shared `Zstd` buckets in `.linear` (`LINEAR_V2`) and `.b_linear` (`BufferedLinear`) decompress 16 to 64 chunks on every cold read and re-pack shared buckets on flush, dropping to `10` and `14` completed teleports under the 24-bot ramp (`5.3 to 5.7 s` cold `p50`). Per-chunk `.lca` slabs complete `1,428 to 1,483` teleports on the same Leaf `26.2` server at `200 to 204 ms` `p50`.
@@ -111,13 +107,13 @@ Benchmarks cover 120 live server runs across 8 platform configurations and isola
 
 ## How it works
 
-All `.lca` region interception, lazy `.mca` migration, internal space-filling curve selection, and `256-byte` Copy-on-Write slab allocation run automatically in the background from the shipped `config.yml` defaults (operators never configure a curve or slab offset):
+Region interception, on-open `.mca` migration, section encoding, and `256-byte` Copy-on-Write slab allocation run automatically in the background from the default `config.yml`:
 
 - **Runtime `RegionFileStorage` & Moonrise bridge:** Hooks `region/`, `entities/`, and `poi/` storage caches on world load and routes chunk I/O through `LcaRegionFileStorage`.
 - **64-byte Superblock, `uint64[1024]` Pointer Directory & `256B` CoW Slabs:** Each `r.<rx>.<rz>.lca` file pairs an 8 KiB atomic pointer directory and Hamming `(72, 64)` parity table with a `256-byte` Copy-on-Write slab pool so live saves never overwrite active readers.
 - **Self-describing ChunkFrames & 1-pass section encoding:** Uniform sections inline into 2-byte directory offsets (`0` body bytes), while non-uniform `16x16x16` sections encode minority blocks and 4-bitplane lighting in a single pass alongside block entities and scheduled ticks.
 
-### Resilience, redundancy, and 4-tier self-healing
+### 4-tier bit-rot recovery
 
 ![LeafAnvil 3-step drop-in workflow and 4-tier bit-rot self-healing architecture](../assets/leafanvil-architecture-workflow.png)
 
@@ -130,11 +126,11 @@ In whole-region `.linear` files, 1 corrupted byte in the shared `Zstd` stream ca
 
 ---
 
-## Testing and quality gates
+## Verification
 
-Every build is verified against real Minecraft world fixtures and live multi-loader servers:
+Every build is tested against real Minecraft world fixtures and live multi-loader servers:
 
-- **Cold-restart persistence (`--verify-persistence`):** Boots a live server, mutates directional blocks (`oak_stairs`, `repeater`), chest/barrel item stacks, and persistent mobs, stops and restarts from `.lca` files with `0` `.mca` files present, and verifies `100%` state survival (`6/6 PASS`).
+- **Cold-restart persistence (`--verify-persistence`):** Boots a live server across all 8 targets (`paper`, `folia`, `leaf-linear`, `leaf-blinear`, `fabric`, `fabric-c2me`, `neoforge`, `neoforge-c2me`), mutates directional blocks (`oak_stairs`, `repeater`), chest/barrel item stacks, and persistent mobs, stops and restarts from `.lca` files with `0` `.mca` files present, and verifies `100%` state survival (`8/8` targets, `6/6 PASS` each).
 - **Bit-exact `.mca <-> .lca` round-trip parity:** Verifies blocks, block state properties, biomes, heightmaps, block entities, `entities/`, `poi/`, and light nibbles on `.mca` fixtures from Minecraft `1.20.4`, `1.21.4`, `26.1`, and `26.3`.
 - **Moonrise & vanilla `RegionFileStorage` interception:** Verifies all 9 dimension storage hooks (`region/`, `entities/`, `poi/` across Overworld, Nether, and End) on Paper, Folia, Fabric, and NeoForge.
 - **10,000-save concurrent CoW & bit-rot suite:** Verifies `0` torn reads under concurrent reader/writer threads, `100%` `256B` slab reuse across 10,000 saves, and automatic recovery from injected bit flips and zeroed pointers.
@@ -144,20 +140,20 @@ Every build is verified against real Minecraft world fixtures and live multi-loa
 
 ## Why I made it
 
-While profiling `LeafRTP` against `.mca`, `.linear`, and `.b_linear` worlds, I kept running into the same storage bottleneck. Vanilla `.mca` wastes roughly a third of every file on 4 KiB sector padding and spends 45% to 60% of chunk-load CPU inside `Zlib` decompression and NBT parsing. Meanwhile, `.linear` and `.b_linear` require custom server forks and pack 16 to 1,024 chunks into shared `Zstd` buckets that stall random cold reads (`2.3 to 5.7 s` under teleport load), rewrite neighbor chunks on save, and lose an entire multi-chunk bucket if one stream corrupts.
+While profiling `LeafRTP` against `.mca`, `.linear`, and `.b_linear` worlds, I kept hitting the same storage bottleneck. Vanilla `.mca` wastes roughly a third of every file on 4 KiB sector padding and spends 45% to 60% of chunk-load CPU inside `Zlib` decompression and NBT parsing. `.linear` and `.b_linear` require custom server forks and pack 16 to 1,024 chunks into shared `Zstd` buckets that stall random cold reads (`2.3 to 5.7 s` under teleport load), rewrite neighbor chunks on save, and lose a multi-chunk bucket if one stream corrupts.
 
-I built `{{name}}` and the `.lca` format to fix both problems in a standard plugin/mod jar without locking in your world files. Every chunk lives in its own `256-byte` Copy-on-Write slab with 4-tier bit-rot recovery, and both the `.lca` binary specification ([`ICD.md`](../../../../api/anvil-api/docs/ICD.md)) and Java reader/writer/transcoder ([`anvil-api`](../../../../api/anvil-api/README.md)) are open-source under the MIT License so you can convert back to `.mca` in-game or offline at any time.
+I built `{{name}}` and `.lca` so each chunk lives in its own `256-byte` Copy-on-Write slab with 4-tier bit-rot recovery inside a standard plugin/mod jar. Both the `.lca` binary specification ([`ICD.md`](../../../../api/anvil-api/docs/ICD.md)) and the Java reader/writer/transcoder ([`anvil-api`](../../../../api/anvil-api/README.md)) are MIT open-source, so you can convert worlds back to `.mca` in-game or offline at any time.
 
 ---
 
 ## Commands, configuration, and FAQ
 
-Operational commands, permissions, configuration keys, common operator questions, and support channels:
+Commands, permissions, `config.yml` settings, FAQ, and support:
 
 <details>
 <summary><b>Commands, permissions, configuration files</b></summary>
 
-**Operational commands** (alias: `/lca`; uses `CommandsAPI` `name=value` syntax):
+**Commands** (alias: `/lca`; uses `name=value` parameters):
 
 | Command | Description | Permission |
 | --- | --- | --- |
@@ -215,7 +211,7 @@ A: The format and codec are MIT open-source; only the live server interceptor (`
 <details>
 <summary><b>Support</b></summary>
 
-Support comes from me, the person who wrote the code.
+I handle support directly through Discord and GitHub:
 
 - For command or config questions, check [`COMMANDS.md`](../admin/COMMANDS.md), [`CONFIGURATION.md`](../admin/CONFIGURATION.md), or open a thread in the `LeafCraft Plugin Support` Discord `#support` Forum (or GitHub Discussions).
 - A bug report in GitHub Issues or the `#support` Forum needs: `/version`, `/leafanvil status` output, `config.yml`, and the server log uploaded to `mclo.gs`.

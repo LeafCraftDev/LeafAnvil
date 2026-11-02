@@ -249,11 +249,18 @@ Live server test results comparing `without-lca` (vanilla `.mca` / native `.line
 
 #### Live Cold-Restart Persistence Verification (`--verify-persistence`)
 
-Cold-restart round-trip (`Boot #1` in-game block, container, and mob mutations -> `save-all flush` -> `stop` -> cold `Boot #2` from `767` `.lca` files and `0` `.mca` files -> RCON/bot query):
+Cold-restart round-trip (`Boot #1` in-game block, container, and mob mutations -> `save-all flush` -> `stop` -> cold `Boot #2` from `.lca` files and `0` `.mca` files -> RCON/bot query):
 
-| Platform | `.lca` / `.mca` Files | `oak_stairs[facing=east,half=top,waterlogged=true]` | `repeater[delay=3,facing=south,locked=true]` | Barrel (`diamond_sword[damage=37]`, `19x golden_apple`) | Chest (`42x emerald_block`) | Persistent `villager` (`1b`) | Persistent `sheep` (`Color=11b`) | Verdict |
+| Platform | `.lca` / `.mca` Files | `oak_stairs[facing=east,half=top,waterlogged=true]` | `repeater[delay=3,facing=south,locked=false,powered=false]` | Barrel (`diamond_sword[damage=37]`, `19x golden_apple`) | Chest (`42x emerald_block`) | Persistent `villager` (`1b`) | Persistent `sheep` (`Color=11b`) | Verdict |
 | :--- | ---: | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `paper` | `772 / 0` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | **`PASS (6/6)`** |
+| `folia` | `778 / 0` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | **`PASS (6/6)`** |
+| `leaf-linear` | `779 / 0` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | **`PASS (6/6)`** |
+| `leaf-blinear` | `781 / 0` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | **`PASS (6/6)`** |
 | `fabric` | `767 / 0` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | **`PASS (6/6)`** |
+| `fabric-c2me` | `767 / 0` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | **`PASS (6/6)`** |
+| `neoforge` | `767 / 0` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | **`PASS (6/6)`** |
+| `neoforge-c2me` | `767 / 0` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | **`PASS (6/6)`** |
 
 #### 4. `Chunky` (`1.5.3`) World Pre-Generation & Border-Scan Benchmark
 
@@ -293,8 +300,8 @@ Measured on `bamboo` (Threadripper 7970X, cores `0-23,32-55`, `-Xms16G -Xmx16G`,
 # Run rotating A/B rounds across Paper, Folia, Fabric, and NeoForge (alternating arm order each round)
 python3 scripts/bench_lca_multiplatform.py --mode rotate --platforms paper,folia,fabric,neoforge
 
-# Run cold-restart block, container, and mob persistence verification
-python3 scripts/bench_lca_multiplatform.py --verify-persistence --platforms fabric
+# Run cold-restart block, container, and mob persistence verification across all 8 platform targets
+python3 scripts/bench_lca_multiplatform.py --verify-persistence --platforms paper,folia,leaf-linear,leaf-blinear,fabric,fabric-c2me,neoforge,neoforge-c2me
 
 # Gracefully finish the active run, flush rolling statistics, and exit
 python3 scripts/bench_lca_multiplatform.py --stop
