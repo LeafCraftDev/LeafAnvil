@@ -123,6 +123,21 @@ Measured with bit-exact voxel, biome, heightmap, entity, POI, and light round-tr
 | Dirty Chunk Save (CPU Latency) | `444.83 us` | `48,991..205,789 us` | `395.94 us` (`1.12x` vs `.mca`, `>120x` vs `.linear`) | `~470.0 us` (per-chunk `Zstd-1`) |
 | 10,000 Concurrent CoW Saves Slab Reuse & Torn Reads | `4.20 -> 18.69 MB` (`82.3%`) | Rewrites `43.4 GB` total | `100.00%` (`10,000 / 10,000`) reuse, `0 B` growth, `0` torn reads | `100.00%` reuse, `0` torn reads |
 
+### 1B. Direct NVMe Random & Sequential I/O Benchmark (`16k` Radius World, `46.48 GB` `.mca` vs `26.96 GB` `.lca`, `1,024`-`4,096` Regions)
+
+Measured on Linux Threadripper 7970X NVMe over `4,000` deterministic random chunks across `1,024` region files (`[-500, 499] x [-500, 499]`), `261,120`-chunk `/rtp scan` sequential sweeps, `Chunky` existing-world scans (`16,641` chunks), and `63` high-rate Folia `26.2` `16k`-radius runs (`4,096` region files):
+
+| I/O Pattern & Workload | `.mca` (`46.48 GB`) | `.lca` (`26.96 GB`, `-42.0%`) | `.lca` NVMe Speedup |
+| :--- | ---: | ---: | :--- |
+| **Random I/O (`1` Thread): Full Chunk Decode (`4,000` chunks)** | `2,339 chks/s` (`p50=359.3 us`, `p95=1,001.3 us`) | **`3,815 chks/s`** (`p50=170.2 us`, `p95=891.4 us`) | **`1.63x` throughput (`+63.1%`), `2.11x` faster `p50`** |
+| **Random I/O (`16` Threads): Full Chunk Decode (`4,000` chunks)** | `54,865 chks/s` (`p50=186.3 us`, `p95=523.5 us`, `p99=2,609.5 us`) | **`186,592 chks/s`** (`p50=71.2 us`, `p95=129.3 us`, `p99=191.6 us`) | **`3.40x` throughput, `4.05x` faster `p95`, `13.6x` faster `p99`** |
+| **Random I/O (`1` Thread): Column Surface Probe (`4,000` chunks)** | `6,783 cols/s` (`p50=133.6 us`, `p95=235.4 us`, `p99=337.5 us`) | **`18,199 cols/s`** (`p50=51.6 us`, `p95=80.6 us`, `p99=119.8 us`) | **`2.68x` throughput, `2.59x-2.92x` faster `p50/p95/p99`** |
+| **Random I/O (`16` Threads): Column Surface Probe (`4,000` chunks)** | `94,157 cols/s` (`p50=140.0 us`, `p95=230.6 us`, `p99=439.4 us`) | **`204,253 cols/s`** (`p50=51.3 us`, `p95=80.1 us`, `p99=356.1 us`) | **`2.17x` throughput, `2.73x-2.88x` faster `p50/p95`** |
+| **Sequential NVMe Burst: `/rtp scan start` (`5s` initial sweep)** | `3,273 chks/s` (`52,361 loc/s`) | **`5,251 chks/s` (`84,014 loc/s`)** | **`1.60x` (`+60.4%`) faster sequential region sweep** |
+| **Sequential NVMe Scan: `Chunky` Existing-World (`16,641` chunks, Folia)** | `2,343.8 cps` (`7.10 s`) | **`8,238.1 cps` (`2.02 s`)** | **`3.51x` faster on Folia (`2.2x-2.5x` vs `.linear`/`.b_linear`)** |
+| **Sustained Folia `26.2` `16k` Live Chunk Streaming (`63` runs, `4,096` regions)** | `143-313 live chks/s` (`68-453` region-hop stalls) | **`4,894-5,398 live chks/s` (`0` region-hop stalls)** | **`23x-35x` more live chunk I/O (`10.1 KiB` lock-free headers)** |
+| **Sequential `16k` World Shutdown Flush (`save-all` + `close()`)** | `34.02-160.62 s` (median `63.03 s`) | **`4.51-7.09 s` (median `5.76 s`)** | **`11.0x-28x` faster shutdown world save** |
+
 ### 2. Continuous Multi-Platform A/B/C Benchmark Driver (`scripts/bench_lca_multiplatform.py`)
 
 Live server test results comparing `without-lca` (vanilla `.mca` / native `.linear` / native `.b_linear` `BufferedLinear`), `with-lca` (`LeafAnvil` `.lca` `zstd-level: 0` / Mode A `0-LZ`), `with-lca-b` (`LeafAnvil` `.lca` `zstd-level: 1` / Mode B `+ Zstd-1`), and `with-lca-zstd6` (`LeafAnvil` `.lca` `zstd-level: 6` / `+ Zstd-6`) across **Paper (`26.2`)**, **Folia (`26.2`)**, **Leaf native `.linear` (`26.2-linear`)**, **Leaf native `BufferedLinear` (`26.2-blinear`, `B_LINEAR`)**, **Fabric (`26.1.2` & `+ C2ME`)**, and **NeoForge (`26.1.2` & `+ C2ME`)** are gathered via [`scripts/bench_lca_multiplatform.py`](scripts/bench_lca_multiplatform.py) (`120` total completed runs, updated `2026-11-01 19:53:36`):
@@ -262,7 +277,7 @@ Cold-restart round-trip (`Boot #1` in-game block, container, and mob mutations -
 | `neoforge` | `767 / 0` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | **`PASS (6/6)`** |
 | `neoforge-c2me` | `767 / 0` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | `PASS` | **`PASS (6/6)`** |
 
-#### 4. `Chunky` (`1.5.3`) World Pre-Generation & Border-Scan Benchmark
+#### 4. `Chunky` (`1.5.3`) World Pre-Generation & Existing-World Scan Benchmark
 
 Measured on `bamboo` (Threadripper 7970X, cores `0-23,32-55`, `-Xms16G -Xmx16G`, fixed seed `8675309`) comparing `without-lca` (`.mca` / `.linear` / `.b_linear`), `with-lca` (`LeafAnvil` `.lca` `zstd-level: 0` Mode A), and `with-lca-b` (`LeafAnvil` `.lca` `zstd-level: 1` Mode B):
 
@@ -281,7 +296,7 @@ Measured on `bamboo` (Threadripper 7970X, cores `0-23,32-55`, `-Xms16G -Xmx16G`,
 | `leaf-blinear` (`26.2`) | `without-lca` | `.b_linear` (`B_LINEAR`) | `10.26 s` | `411.8 cps` (`428.1`) | `0.06 s` (`1,304`) | `3.02 s` | `13.28 s` | `26.13 MB` |
 | `leaf-blinear` (`26.2`) | `with-lca-b` | `.lca` (`zstd=1`) | **`10.51 s` (`1.0x`)** | **`402.0 cps` (`413.3`)** | **`0.05 s` (`1,287`)** | **`2.22 s` (`1.36x`)** | **`12.73 s` (`1.04x`)** | **`25.00 / 24.52 MB` (`-6.2%`)** |
 
-**4B. Existing-World Border Scan (`/chunky radius 1024`, `2,048 x 2,048` blocks, `16,641` chunks over the `767`-region / `293,317`-chunk template):**
+**4B. Existing-World Scan (`/chunky radius 1024`, `2,048 x 2,048` blocks, `16,641` chunks over the `767`-region / `293,317`-chunk template):**
 
 | Platform | Arm | Format | `Chunky` Scan Time (`s`) | Effective `CPS` (Peak `CPS`) | `ChunkHolderManager` Save (`s`) | Server Stop (`s`) | Total Time (`s`) | Template Disk (`MB`) |
 | :--- | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -295,6 +310,25 @@ Measured on `bamboo` (Threadripper 7970X, cores `0-23,32-55`, `-Xms16G -Xmx16G`,
 | `leaf-linear` (`26.2`) | `with-lca-b` | `.lca` (`zstd=1`) | **`2.01 s` (`2.2x`)** | **`8,279.1 cps` (`8,917.5`)** | **`0.01 s`** | **`2.02 s`** | **`4.03 s` (`1.7x`)** | **`1,270.24 MB` (`-24.0%`)** |
 | `leaf-blinear` (`26.2`) | `without-lca` | `.b_linear` (`B_LINEAR`) | `5.01 s` | `3,321.6 cps` (`3,885.0`) | `0.01 s` | `2.42 s` | `7.43 s` | `1,407.56 MB` |
 | `leaf-blinear` (`26.2`) | `with-lca-b` | `.lca` (`zstd=1`) | **`2.01 s` (`2.5x`)** | **`8,279.1 cps` (`8,620.7`)** | **`0.01 s`** | **`2.22 s`** | **`4.23 s` (`1.8x`)** | **`1,270.24 MB` (`-9.8%`)** |
+
+#### 5. `LeafTreeGen` (`1.1.0`) 24-Cell Clean-Boot Tree Generation & `.lca` Storage Matrix (`seed=8675309`)
+
+Measured across **4 platforms** (`Paper 26.2`, `Folia 26.2`, `NeoForge 26.1.2`, `Fabric 26.1.2`), **2 storage formats** (vanilla `.mca` vs `.lca` Mode A `zstd-level: 0`), and **3 [`LeafTreeGen`](resource/LeafTreeGen/README.md) tree modes** (`NONE` vanilla baseline, `DATAPACK` jigsaw structures, `PROCEDURAL` `TreeBlockBatcher`) on high-density dry-land `forest` and `birch_forest` continents (`surfaceY = 73..82`, `~391,500` custom tree blocks placed per cell across Stage 1 `64`-chunk gen and Stage 2 `128`-chunk 4-wave rolling gen + `save-all`, followed by Stage 3 `192`-chunk reload/unload churn):
+
+| Platform | Mode | Cold Boot (`.mca` / `.lca`) | P1: `64`-Chunk Gen Wall (`.mca` / `.lca`) | P1: Server Chunk Win (`.mca` / `.lca` `ms`) | P2: `128`-Chunk Rolling Gen+Save (`.mca` / `.lca`) | P3: `192`-Chunk Reload/Unload (`.mca` / `.lca`) | Region Disk Size (`.mca` vs `.lca`) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Paper `26.2`** | `NONE` | `16.31 s` / `18.35 s` | `5.02 s` / **`4.79 s`** (`13.36 ch/s`) | `3,337` / **`3,021 ms`** | `10.30 s` / `12.81 s` | `1.18 s` / `2.03 s` | `28.89 MB` vs **`7.53 MB` (`-73.9%`)** |
+| **Paper `26.2`** | `DATAPACK` | `29.30 s` / `30.81 s` | `7.75 s` / **`7.41 s`** (`8.64 ch/s`) | `4,551` / **`4,362 ms`** | `19.70 s` / **`19.55 s`** | `1.14 s` / `1.26 s` | `29.10 MB` vs **`8.04 MB` (`-72.4%`)** |
+| **Paper `26.2`** | `PROCEDURAL` | `15.62 s` / `16.04 s` | `7.78 s` / **`7.44 s`** (`8.60 ch/s`) | `2,770` / **`2,623 ms`** (`172,797` blocks) | `19.64 s` / `20.01 s` (`218,748` blocks) | **`0.98 s`** / `1.22 s` (`194.9` / `157.8 ch/s`) | `28.78 MB` vs **`7.54 MB` (`-73.8%`)** |
+| **Folia `26.2`** | `NONE` | `15.36 s` / `16.77 s` | **`4.83 s`** / `4.90 s` (`13.26 ch/s`) | `1,140` / **`1,133 ms`** | `11.10 s` / `12.82 s` | `3.80 s` / **`3.25 s`** (`59.0 ch/s`) | `28.85 MB` vs **`7.42 MB` (`-74.3%`)** |
+| **Folia `26.2`** | `DATAPACK` | `28.72 s` / `29.57 s` | **`8.11 s`** / `8.27 s` (`7.89 ch/s`) | `1,777` / `1,900 ms` | `22.47 s` / `23.97 s` | `3.75 s` / `3.87 s` | `28.98 MB` vs **`7.86 MB` (`-72.9%`)** |
+| **Folia `26.2`** | `PROCEDURAL` | `13.93 s` / `15.05 s` | `8.02 s` / **`7.72 s`** (`8.29 ch/s`) | `1,389` / **`1,132 ms`** (`172,795` blocks) | `22.40 s` / `23.66 s` (`218,768` blocks) | `3.70 s` / `4.07 s` | `28.64 MB` vs **`7.38 MB` (`-74.2%`)** |
+| **NeoForge `26.1.2`** | `NONE` | `13.57 s` / `14.84 s` | `8.95 s` / `10.09 s` (`7.15 ch/s`) | `6,807` / `7,570 ms` | `18.33 s` / `21.42 s` | `1.44 s` / `1.46 s` | `24.85 MB` vs **`8.76 MB` (`-64.8%`)** |
+| **NeoForge `26.1.2`** | `DATAPACK` | `28.31 s` / `33.94 s` | `26.29 s` / `36.75 s` (`2.43 ch/s`) | `12,917` / `18,013 ms` | `87.04 s` / `95.12 s` | `1.39 s` / `2.11 s` | `25.02 MB` vs **`8.87 MB` (`-64.6%`)** |
+| **NeoForge `26.1.2`** | `PROCEDURAL` | `11.81 s` / `12.60 s` | `15.76 s` / `15.97 s` (`4.06 ch/s`) | `6,747` / **`6,724 ms`** (`169,173` blocks) | `30.58 s` / `33.22 s` (`218,835` blocks) | `1.36 s` / **`1.20 s` (`160.0 ch/s`, `+13%`)** | `24.48 MB` vs **`8.86 MB` (`-63.8%`)** |
+| **Fabric `26.1.2`** | `NONE` | `14.34 s` / `15.83 s` | `9.57 s` / `10.73 s` (`6.69 ch/s`) | `7,514` / `7,769 ms` | `17.68 s` / `21.37 s` | `1.43 s` / `1.46 s` | `24.79 MB` vs **`8.73 MB` (`-64.8%`)** |
+| **Fabric `26.1.2`** | `DATAPACK` | `34.09 s` / `35.12 s` | `34.63 s` / `35.93 s` (`1.85 ch/s`) | `17,055` / **`16,393 ms`** | `109.58 s` / **`94.73 s` (`+13.6%`)** | `1.40 s` / `2.20 s` | `24.96 MB` vs **`8.84 MB` (`-64.6%`)** |
+| **Fabric `26.1.2`** | `PROCEDURAL` | `12.79 s` / `13.54 s` | `15.63 s` / **`15.50 s`** (`4.13 ch/s`) | `6,346` / **`6,062 ms`** (`169,176` blocks) | `31.47 s` / `31.70 s` (`218,835` blocks) | `1.62 s` / **`1.29 s` (`148.8 ch/s`, `+20%`)** | `24.46 MB` vs **`8.85 MB` (`-63.8%`)** |
 
 ```bash
 # Run rotating A/B rounds across Paper, Folia, Fabric, and NeoForge (alternating arm order each round)

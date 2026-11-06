@@ -2,6 +2,17 @@
 
 All notable changes to `LeafAnvil` are documented in this file.
 
+## [0.1.1] - 2026-11-05
+
+### Added
+- **Sub-chunk `.lca` block patching (`ChunkPatchTail`, `HAS_CHUNK_PATCH_TAIL = 0x4000`, `LCA-ICD-1.0` Section 8.3) and unified `RegionFileResolver#patchChunkBlocks`:** Appends Slab-Local Micro-Palette extensions and per-section voxel, light, and heightmap patches (`LcaRegionWriter#patchChunkBlocks`, `LcaSectionCodec#encodeChunkPatchTailBytes`, `AnvilReader#patchChunkInMcaBytes`) with $O(1)$ residual-tail seek during `readChunkView`, `readColumnProbe`, and `readTerrainProbe` without full-chunk NBT decode/re-encode (`leafanvil-ADR-002`, `leafanvil-ADR-003`).
+
+### Fixed
+- **Concurrent Moonrise worker reads and dictionary growth during high-throughput generation (such as `Chunky`) could publish a stale `cachedParsedDict` snapshot (`CorruptRegionEntryException: CBIT T7: Slab-local globalStateId ... out of range`):** Synchronized `LcaRegionWriter.LcaLiveArchive#getOrBuildParsedHeaderAndDict` snapshot construction/publication and invalidated `cachedParsedDict` in `registerNewBlockStateId`, `registerNewBiomeId`, and `rollbackDictionaryToBookmark` before publishing new block-state or biome IDs.
+- **Out-of-cache `.lca` region opens on large (`16k`+) world borders issued `2,050` syscalls per 1,024-chunk region and eagerly built the `TreeMap` free-slab allocator on read-only opens:** Clean `LcaLiveArchive` opens now trust verified `SEC-DED` pointer syndromes + trailing `LCA1_END` canary (`2` `pread` syscalls, `0` `ch.size()` calls - `8.5x-16.3x` faster region open), and `ensureFreeSlabPoolInitialized()` defers free-slab `TreeMap` construction until the first write.
+- **Unpromoted FIFO cache eviction and concurrent read/compaction race on live region eviction:** Replaced FIFO / hash-bucket eviction in `LcaRegionFileStorage` (`regionCache`, `readChannelCache`) and `LcaRegionReader` (`FILE_HEADER_CACHE`, raised to `4,096` headers) with lock-free Second-Chance Clock LRU promotion, coalesced `headerOnlyChannelMode` `compact()` into a single `pread`/`pwrite` pass completed prior to `regionCache` removal, routed `removeChunk` through the 4-epoch `CoW` grace ring, and added `.lca` support to `AnvilRegionOccupancyCache#isOccupied`.
+- **`ClassCastException` on `RegionFileStorage.regionCache` implementations storing `Optional<RegionFile>` values:** `NmsRegionStorageInterceptor` now inspects generic `regionCache` type parameters (`usesOptionalCacheValues`) and wraps `$$LeafAnvilRfBridge` instances in `Optional.of(...)` when required.
+
 ## [0.1.0] - 2026-11-01
 
 ### Added
