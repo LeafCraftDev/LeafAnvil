@@ -387,23 +387,3 @@ if (!excludeNeoforge) {
 
 // Standalone sibling resources (multi-loader plugins and mods) in the monorepo
 // (consume api/* SDK libraries directly; no rtp-api / rtp-core dependency).
-
-
-
-
-
-
-
-
-
-
-include 'resource:LeafShard:leafshard-common'
-include 'resource:LeafShard:leafshard-paper'
-include 'resource:LeafShard:leafshard-velocity'
-include 'resource:LeafShard:leafshard-plugin'
-if (!excludeJdk25) {
-    include 'resource:LeafShard:leafshard-fabric'
-}
-if (!excludeNeoforge && !excludeJdk25) {
-    include 'resource:LeafShard:leafshard-neoforge'
-}
