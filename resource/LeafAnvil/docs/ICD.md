@@ -29,4 +29,6 @@
 - **Format Architecture & Rationale:** [`anvil-api-ADR-003`](../../../api/anvil-api/docs/adr/anvil-api-ADR-003-hilbert-roaring-gray-chunk-archive.md)
 - **Multi-Format Region Reader SPI:** [`anvil-api-ADR-002`](../../../api/anvil-api/docs/adr/anvil-api-ADR-002-multi-format-region-support.md)
 - **Multi-Loader Runtime Carrier & Bytecode Interceptor:** [`leafanvil-ADR-001`](adr/leafanvil-ADR-001-Multi-Loader-lca-world-storage-and-bytecode-interceptor.md)
+- **In-Memory `.lca` Chunk Representation & Dirty-Overlay Compaction:** [`leafanvil-ADR-002`](adr/leafanvil-ADR-002-in-memory-lca-chunk-representation-and-dirty-overlay-compaction.md)
+- **Negotiated Server-to-Client `.lca` Chunk Network Streaming (`Fabric` & `NeoForge`):** [`leafanvil-ADR-003`](adr/leafanvil-ADR-003-negotiated-lca-chunk-network-streaming-and-delta-sync.md)
 - **Reference Codec Implementation (`MIT`):** `io.github.dailystruggle.anvil.LcaRegionReader`, `LcaRegionWriter`, `LcaSectionCodec` ([`api/anvil-api`](../../../api/anvil-api/README.md))
