@@ -4,7 +4,7 @@ Follows docs/dev/RULES.md Rule D-006 (first-person plain voice, 3-Zone hierarchy
 ASCII punctuation only, concrete benchmark numbers and honest caveats).
   BuiltByBit Card Title: "LeafAnvil - 50% Smaller Worlds & 15.5x Faster Saves"
   BuiltByBit Card Thumbnail: docs/assets/leafanvil-card-thumbnail.png
-  BuiltByBit Carousel Slides: docs/assets/leafanvil-card-thumbnail.png, docs/assets/leafanvil-benchmark-comparison.png, docs/assets/leafanvil-architecture-workflow.png
+  BuiltByBit Carousel Slides: docs/assets/leafanvil-action-showcase.webp, docs/assets/leafanvil-card-thumbnail.png, docs/assets/leafanvil-benchmark-comparison.png, docs/assets/leafanvil-architecture-workflow.png
   Title: "LeafAnvil"  tagline: "Cut world disk & backup size by 50%, speed up server shutdown saves 15.5x, and self-heal chunk corruption on Paper, Folia, Fabric & NeoForge"
 -->
 
@@ -24,13 +24,15 @@ ASCII punctuation only, concrete benchmark numbers and honest caveats).
 
 ## Storage
 
-**{{name}} is a drop-in `.lca` world storage plugin and mod for Paper, Folia, Spigot, Fabric, and NeoForge.** Drop the jar into `plugins/` or `mods/` and start the server. Existing `.mca`, `.linear`, and `.b_linear` (`BufferedLinear`) files across `region/`, `entities/`, and `poi/` convert automatically as chunks open while keeping `.bak` backups on disk.
+**{{name}} cuts world disk and backup size by `50%` (`2,528 MB -> 1,270 MB`), speeds up 60-second server shutdown saves by `15.5x` (`86.1 s -> 5.5 s`), and self-heals bit-rot chunk corruption as a drop-in `.lca` world storage plugin and mod for Paper, Folia, Spigot, Fabric, and NeoForge.** Drop the jar into `plugins/` or `mods/` and start the server: existing `.mca`, `.linear`, and `.b_linear` (`BufferedLinear`) files across `region/`, `entities/`, and `poi/` convert automatically as chunks open while keeping `.bak` backups on disk.
 
 It hooks `RegionFileStorage` in memory at startup, so `Chunky`, `WorldEdit` / `FAWE`, `C2ME`, `BlueMap`, `Dynmap`, `squaremap`, `CoreProtect`, and custom world generators work without changes, and [`LeafRTP`](../../../LeafRTP/docs/publishing/FRONT_PAGE.md) reads `.lca` files directly.
 
 One jar runs on Paper and Spigot (1.20+), Folia (1.21+), Fabric (26.1+), and NeoForge (26.1+). **Open `.lca` Specification & MIT Codec (Zero Lock-In):** The `.lca` binary specification ([`ICD.md`](../../../../api/anvil-api/docs/ICD.md)) and standalone Java codec/converter ([`anvil-api`](../../../../api/anvil-api/README.md)) are MIT open-source, while the live multi-loader server plugin/mod runtime is DRM-free, unobfuscated, and licensed under `LicenseRef-LeafCraft-Commercial`.
 
+<!-- not: bbb -->
 ![LeafAnvil 120-run benchmark summary across Paper, Folia, Leaf .linear, Leaf .b_linear, Fabric, and NeoForge](../assets/leafanvil-benchmark-comparison.png)
+<!-- /not -->
 
 ### TL;DR
 
@@ -123,7 +125,9 @@ Region interception, on-open `.mca` migration, section encoding, and `256-byte` 
 
 ### 4-tier bit-rot recovery
 
+<!-- not: bbb -->
 ![LeafAnvil 3-step drop-in workflow and 4-tier bit-rot self-healing architecture](../assets/leafanvil-architecture-workflow.png)
+<!-- /not -->
 
 In whole-region `.linear` files, 1 corrupted byte in the shared `Zstd` stream can break all `1,024` chunks; in vanilla `.mca`, 1 corrupted `Zlib` stream loses all `24` sections of that chunk. `.lca` isolates faults across four tiers ([`BIT_CODES.md`](../dev/BIT_CODES.md), `/leafanvil heal`):
 
@@ -238,4 +242,6 @@ I handle support directly through Discord and GitHub:
 - [**Changelog**](../../CHANGELOG.md)
 - [**LeafShard**](../../../LeafShard/README.md): distributed `.lca` world-sharding mesh engine built on `LeafAnvil`'s zero-translation `LCAS` (`0x4C434153`) delta streaming SPI
 - [**LeafRTP**](../../../LeafRTP/docs/publishing/FRONT_PAGE.md): zero-wait random teleportation (`/rtp` & `/wild`) with native `8.55 us` `.lca` terrain pre-filtering
+- [**LeafSleuth**](../../../LeafSleuth/docs/publishing/FRONT_PAGE.md): catches walk-away lag-machine builders (`CoreProtect`), item dupes, stash rings, and VPN ban-evader alts while cutting hotspot load by `-68.6%`
 - [**LeafTreeGen**](../../../LeafTreeGen/docs/publishing/FRONT_PAGE.md): procedural custom biome trees baked into native vanilla jigsaw worldgen datapacks
+- [**LeafSleep (`OnePlayerSleep`)**](../../../LeafSleep/docs/publishing/FRONT_PAGE.md): population-scaled sleep voting, anti-troll `[Cancel]`, and cross-server dawn sync
