@@ -8,7 +8,7 @@
 
 | Command | Parameters | Default Permission | Description |
 |---|---|---|---|
-| `/leafanvil` *(or `/lca`)* | *(none)* | `leafanvil.admin` (`op`) | Displays the live `.lca` world storage status (`enabled`, `autoMigrate`, `zstdLevel`, `modeBZstd`, `attachedWorlds`, `interceptedStorages`) and per-world counters (`openRegions`, `migrated`, `intercepted`, `dimensionDirectory`). Alias for `/leafanvil status`. |
+| `/leafanvil` *(or `/lca`)* | *(none)* | `leafanvil.admin` (`op`) | Displays the live `.lca` world storage status (`enabled`, `autoMigrate`, `modeB`, `attachedWorlds`, `interceptedStorages`) and per-world counters (`openRegions`, `migrated`, `intercepted`, `dimensionDirectory`). Alias for `/leafanvil status`. |
 | `/leafanvil status` | *(none)* | `leafanvil.admin` (`op`) | Displays `.lca` runtime configuration and per-world open/migrated/intercepted `RegionFileStorage` counters across Overworld, Nether (`DIM-1`), The End (`DIM1`), and `26.1+` `dimensions/<namespace>/<dimension>/` directories. |
 | `/leafanvil convert` | `[world=<name\|all>] [format=<lca\|mca>]` | `leafanvil.admin` (`op`) | Flushes target world storage sessions and asynchronously transcodes all region files (`region/`, `entities/`, `poi/`) to `.lca` (`format=lca`, default) or reversibly back to vanilla `.mca` (`format=mca`). Preserves original files as `.bak` when `backup-migrated-legacy-files: true`. |
 | `/leafanvil compact` | `[world=<name\|all>]` | `leafanvil.admin` (`op`) | Asynchronously compacts open `.lca` region files whose `256-byte` Copy-on-Write (`CoW`) free-slab fragmentation ratio exceeds `compact-fragmentation-threshold` (`0.35` by default) and flushes them to disk. |
