@@ -218,6 +218,7 @@ project(':schematics-api').projectDir = file('api/schematics-api')
 // Shared server-side and proxy platform modules are grouped under the
 // platforms/ folder (bukkit, paper, folia, fabric, neoforge, proxy).
 include 'bukkit:bukkit-common'
+include 'paper:paper-common'
 
 // rtp-plugin is the shaded Bukkit-family aggregator. It bundles the JDK-25
 // Fabric carriers (fabric-v26_1_R1 / *-unobf / effects-api-fabric-unobf)
@@ -291,6 +292,8 @@ if (!excludeJdk25) {
 project(':bukkit').projectDir                    = file('platforms/bukkit')
 project(':bukkit:bukkit-common').projectDir      = file('platforms/bukkit/bukkit-common')
 
+project(':paper').projectDir                     = file('platforms/paper')
+project(':paper:paper-common').projectDir        = file('platforms/paper/paper-common')
 
 
 findProject(':fabric')?.projectDir                    = file('platforms/fabric')
@@ -385,3 +388,22 @@ if (!excludeNeoforge) {
 
 // Standalone sibling resources (multi-loader plugins and mods) in the monorepo
 // (consume api/* SDK libraries directly; no rtp-api / rtp-core dependency).
+
+
+
+
+
+
+
+
+
+include 'resource:LeafAnvil:leafanvil-common'
+include 'resource:LeafAnvil:leafanvil-paper'
+include 'resource:LeafAnvil:leafanvil-plugin'
+include 'resource:LeafAnvil:leafanvil-net'
+if (!excludeJdk25) {
+    include 'resource:LeafAnvil:leafanvil-fabric'
+}
+if (!excludeNeoforge && !excludeJdk25) {
+    include 'resource:LeafAnvil:leafanvil-neoforge'
+}

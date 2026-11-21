@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "leafanvil_net",
+  "version": "0.3.0",
+  "name": "LeafAnvil Net",
+  "description": "Free MIT-licensed server TX + client RX mod for LeafAnvil LCA_NET_V1 .lca chunk streaming, revisit delta caching, and RAM section compaction.",
+  "authors": ["leaf"],
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "net.leaf.anvil.fabric.client.FabricLeafAnvilClientMod",
+      "net.leaf.anvil.fabric.FabricLeafAnvilMod"
+    ],
+    "client": [
+      "net.leaf.anvil.fabric.client.FabricLeafAnvilClientMod"
+    ]
+  },
+  "mixins": [
+    "leafanvil-net.fabric.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.18.4",
+    "fabric-api": "*",
+    "minecraft": ">=26.1"
+  }
+}

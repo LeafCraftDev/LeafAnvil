@@ -1,0 +1,326 @@
+name: Release LeafAnvil (BuiltByBit Server + GitHub Releases Client Mod)
+
+# Multi-product monorepo release pipeline for LeafAnvil & LeafAnvil-Net (ADR-126, leafanvil-ADR-001..008):
+#   - Uploads pre-built commercial `LeafAnvil-<version>.jar` EXCLUSIVELY to BuiltByBit via
+#     the V2 Creator Update API (`POST /v2/resources/creator/update`) when
+#     `BBB_ANVIL_RESOURCE_ID` (or `inputs.bbb_resource_id`) is configured
+#     (personal and private-testing users compile `LeafAnvil` from source on
+#     `LeafCraftDev/LeafAnvil` under `PolyForm-Noncommercial-1.0.0`).
+#   - Publishes the free MIT companion mod (`LeafAnvil-Net-<version>.jar` +
+#     `.sha256`, `.sha512`, `.asc`) on the public `leafanvil-v<semver>` GitHub
+#     Release with `make_latest: false` so `/releases/latest` on DailyStruggle/RTP
+#     remains pinned to LeafRTP.
+#   - Reads version from `resource/LeafAnvil/leafanvil-plugin/build.gradle` and
+#     release notes from `resource/LeafAnvil/CHANGELOG.md` (if present).
+#   - Builds and signs both `LeafAnvil-<version>.jar` and `LeafAnvil-Net-<version>.jar`
+#     with the repository PGP key (`SIGNING_KEY`), attaches `.sha256` and `.sha512`
+#     checksums, and generates GitHub SLSA build provenance.
+
+on:
+  push:
+    tags:
+      - 'leafanvil-v*.*.*'
+      - 'anvil-v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'LeafAnvil version string to release (e.g. 0.2.1). If omitted, read from resource/LeafAnvil/leafanvil-plugin/build.gradle.'
+        required: false
+        type: string
+      bbb_resource_id:
+        description: 'BuiltByBit resource ID for LeafAnvil (falls back to BBB_ANVIL_RESOURCE_ID repository variable/secret).'
+        required: false
+        type: string
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+
+      - name: Determine release version and tag
+        id: version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
+            TAG="leafanvil-v${VERSION}"
+          elif [ "$REF_TYPE" = "tag" ] && [[ "$REF_NAME" =~ ^(leafanvil|anvil)-[vV]([0-9]+\.[0-9]+.*)$ ]]; then
+            VERSION="${BASH_REMATCH[2]}"
+            TAG="$REF_NAME"
+          else
+            VERSION=$(grep -E "^version\s*=\s*['\"]" resource/LeafAnvil/leafanvil-plugin/build.gradle | head -n 1 | sed -E "s/.*['\"]([^'\"]+)['\"].*/\1/" | tr -d '[:space:]')
+            TAG="leafanvil-v${VERSION}"
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not determine LeafAnvil release version."
+            exit 1
+          fi
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$ ]]; then
+            echo "::error::Invalid LeafAnvil release version format: ${VERSION}"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Releasing LeafAnvil version: ${VERSION} (tag ${TAG})"
+
+      - name: Set up JDK 21 and 25
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          java-version: |
+            21
+            25
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build and validate LeafAnvil and LeafAnvil-Net storefront pages (ADR-130)
+        run: |
+          python3 scripts/release/build_front_pages.py --product leafanvil
+          python3 scripts/release/build_front_pages.py --product leafanvil-net
+
+      - name: Build LeafAnvil and LeafAnvil-Net jars + checksums + signing
+        env:
+          ORG_GRADLE_PROJECT_signingKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.SIGNING_PASSWORD }}
+        run: ./gradlew :resource:LeafAnvil:leafanvil-common:check :resource:LeafAnvil:leafanvil-paper:check :resource:LeafAnvil:leafanvil-plugin:build :resource:LeafAnvil:leafanvil-plugin:generateChecksums :resource:LeafAnvil:leafanvil-plugin:signDeliverables :resource:LeafAnvil:leafanvil-net:build :resource:LeafAnvil:leafanvil-net:generateChecksums :resource:LeafAnvil:leafanvil-net:signDeliverables
+
+      - name: Locate LeafAnvil and LeafAnvil-Net jars and release deliverables
+        id: artifact
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: |
+          ANVIL_JAR=$(find resource/LeafAnvil/leafanvil-plugin/build/libs -maxdepth 1 -type f -name "LeafAnvil-${VERSION}.jar" | head -n 1)
+          if [ -z "$ANVIL_JAR" ] || [ ! -f "$ANVIL_JAR" ]; then
+            ANVIL_JAR=$(find resource/LeafAnvil/leafanvil-plugin/build/libs -maxdepth 1 -type f -name 'LeafAnvil-*.jar' \
+              ! -name '*-dev.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' | sort -V | tail -n 1)
+          fi
+          if [ -z "$ANVIL_JAR" ] || [ ! -f "$ANVIL_JAR" ]; then
+            echo "::error::Could not locate LeafAnvil jar under resource/LeafAnvil/leafanvil-plugin/build/libs/"
+            ls -la resource/LeafAnvil/leafanvil-plugin/build/libs/ || true
+            exit 1
+          fi
+          echo "jar=${ANVIL_JAR}" >> "$GITHUB_OUTPUT"
+          echo "Found LeafAnvil jar: ${ANVIL_JAR}"
+
+          NET_JAR=$(find resource/LeafAnvil/leafanvil-net/build/libs -maxdepth 1 -type f -name "LeafAnvil-Net-${VERSION}.jar" | head -n 1)
+          if [ -z "$NET_JAR" ] || [ ! -f "$NET_JAR" ]; then
+            NET_JAR=$(find resource/LeafAnvil/leafanvil-net/build/libs -maxdepth 1 -type f -name 'LeafAnvil-Net-*.jar' \
+              ! -name '*-dev.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' | sort -V | tail -n 1)
+          fi
+          if [ -z "$NET_JAR" ] || [ ! -f "$NET_JAR" ]; then
+            echo "::error::Could not locate LeafAnvil-Net jar under resource/LeafAnvil/leafanvil-net/build/libs/"
+            ls -la resource/LeafAnvil/leafanvil-net/build/libs/ || true
+            exit 1
+          fi
+          echo "client_jar=${NET_JAR}" >> "$GITHUB_OUTPUT"
+          echo "Found LeafAnvil-Net jar: ${NET_JAR}"
+
+          if [ -f "${ANVIL_JAR}.asc" ]; then
+            echo "asc=${ANVIL_JAR}.asc" >> "$GITHUB_OUTPUT"
+            echo "Found PGP signature: ${ANVIL_JAR}.asc"
+          elif [ -n "$SIGNING_KEY" ]; then
+            echo "::error::Missing PGP signature ${ANVIL_JAR}.asc despite SIGNING_KEY being configured."
+            exit 1
+          fi
+
+          if [ -f "${NET_JAR}.asc" ]; then
+            echo "client_asc=${NET_JAR}.asc" >> "$GITHUB_OUTPUT"
+            echo "Found PGP signature: ${NET_JAR}.asc"
+          elif [ -n "$SIGNING_KEY" ]; then
+            echo "::error::Missing PGP signature ${NET_JAR}.asc despite SIGNING_KEY being configured."
+            exit 1
+          fi
+
+      - name: Extract release notes from resource/LeafAnvil/CHANGELOG.md
+        id: notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          CHANGELOG_FILE="resource/LeafAnvil/CHANGELOG.md"
+          if [ ! -f "$CHANGELOG_FILE" ]; then
+            echo "::warning::${CHANGELOG_FILE} not found; falling back to generic release notes."
+            echo "LeafAnvil ${VERSION}" > release-notes-anvil.md
+          else
+            awk -v ver="$VERSION" '
+              BEGIN { capture = 0 }
+              /^## \[/ {
+                if (capture) { exit }
+                if (index($0, "[" ver "]") > 0) { capture = 1; next }
+              }
+              /^\[[0-9]+\.[0-9]+/ {
+                if (capture) { exit }
+              }
+              capture == 1 { print }
+            ' "$CHANGELOG_FILE" > release-notes-anvil.md
+
+            if [ ! -s release-notes-anvil.md ]; then
+              awk '
+                BEGIN { capture = 0 }
+                /^## \[Unreleased\]/ { capture = 1; next }
+                /^## \[/ { if (capture) { exit } }
+                capture == 1 { print }
+              ' "$CHANGELOG_FILE" > release-notes-anvil.md
+            fi
+
+            if [ ! -s release-notes-anvil.md ]; then
+              echo "::warning::No matching section in ${CHANGELOG_FILE} for [${VERSION}]; using placeholder."
+              echo "LeafAnvil ${VERSION}" > release-notes-anvil.md
+            fi
+          fi
+          echo "--- release-notes-anvil.md ---"
+          cat release-notes-anvil.md
+          echo "--- end ---"
+
+      - name: Generate SLSA Build Provenance
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: |
+            ${{ steps.artifact.outputs.jar }}
+            ${{ steps.artifact.outputs.client_jar }}
+
+      - name: Publish LeafAnvil Server Jar to BuiltByBit
+        env:
+          BBB_API_TOKEN: ${{ secrets.BBB_API_TOKEN }}
+          BBB_CLIENT_ID: ${{ secrets.BBB_CLIENT_ID }}
+          BBB_CLIENT_SECRET: ${{ secrets.BBB_CLIENT_SECRET }}
+          INPUT_BBB_RESOURCE_ID: ${{ github.event.inputs.bbb_resource_id }}
+          SECRET_BBB_RESOURCE_ID: ${{ secrets.BBB_ANVIL_RESOURCE_ID }}
+          VAR_BBB_RESOURCE_ID: ${{ vars.BBB_ANVIL_RESOURCE_ID }}
+          VERSION: ${{ steps.version.outputs.version }}
+          ANVIL_JAR: ${{ steps.artifact.outputs.jar }}
+        run: |
+          RESOURCE_ID="${INPUT_BBB_RESOURCE_ID:-${VAR_BBB_RESOURCE_ID:-$SECRET_BBB_RESOURCE_ID}}"
+          if [ -z "$RESOURCE_ID" ]; then
+            echo "::notice::BBB_ANVIL_RESOURCE_ID (or inputs.bbb_resource_id) not configured; skipping BuiltByBit upload."
+            exit 0
+          fi
+
+          AUTH_HEADER=""
+          if [ -n "$BBB_API_TOKEN" ]; then
+            AUTH_HEADER="Authorization: Private ${BBB_API_TOKEN}"
+          elif [ -n "$BBB_CLIENT_ID" ] && [ -n "$BBB_CLIENT_SECRET" ]; then
+            echo "Requesting OAuth2 access token using Client ID and Secret..."
+            TOKEN_RESP=$(curl -s -X POST "https://api.builtbybit.com/oauth2/token" \
+              -H "Content-Type: application/x-www-form-urlencoded" \
+              -d "grant_type=client_credentials&client_id=${BBB_CLIENT_ID}&client_secret=${BBB_CLIENT_SECRET}")
+
+            ACCESS_TOKEN=$(echo "$TOKEN_RESP" | jq -r '.access_token // empty')
+            if [ -z "$ACCESS_TOKEN" ]; then
+              echo "::error::Failed to obtain OAuth2 access token: ${TOKEN_RESP}"
+              exit 1
+            fi
+            AUTH_HEADER="Authorization: Bearer ${ACCESS_TOKEN}"
+            echo "Successfully obtained OAuth2 access token."
+          else
+            echo "::error::Neither BBB_API_TOKEN nor (BBB_CLIENT_ID + BBB_CLIENT_SECRET) configured in repository secrets."
+            exit 1
+          fi
+
+          TITLE="LeafAnvil ${VERSION}"
+          MESSAGE=$(cat release-notes-anvil.md)
+
+          echo "Uploading ${ANVIL_JAR} as version ${VERSION} to BuiltByBit resource ${RESOURCE_ID}..."
+
+          PAYLOAD_DIR=$(mktemp -d)
+          base64 -w 0 "${ANVIL_JAR}" > "${PAYLOAD_DIR}/file.b64"
+          jq -n \
+            --argjson resource_id "${RESOURCE_ID}" \
+            --arg version_name "${VERSION}" \
+            --arg file_name "$(basename "${ANVIL_JAR}")" \
+            --rawfile file_data "${PAYLOAD_DIR}/file.b64" \
+            --arg title "${TITLE}" \
+            --arg message "${MESSAGE}" \
+            '{
+              resource_id: $resource_id,
+              version_name: $version_name,
+              file: { name: $file_name, data: $file_data },
+              update: { post: true, title: $title, message: $message }
+            }' > "${PAYLOAD_DIR}/payload.json"
+
+          HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://api.builtbybit.com/v2/resources/creator/update" \
+            -H "${AUTH_HEADER}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            --data-binary "@${PAYLOAD_DIR}/payload.json")
+          rm -rf "${PAYLOAD_DIR}"
+
+          HTTP_BODY=$(echo "$HTTP_RESPONSE" | sed '$d')
+          HTTP_STATUS=$(echo "$HTTP_RESPONSE" | tail -n 1)
+
+          echo "BuiltByBit API response status: ${HTTP_STATUS}"
+          echo "BuiltByBit API response body: ${HTTP_BODY}"
+
+          if [ "$HTTP_STATUS" -ne 200 ] && [ "$HTTP_STATUS" -ne 201 ]; then
+            echo "::error::BuiltByBit release upload failed with HTTP status ${HTTP_STATUS}: ${HTTP_BODY}"
+            exit 1
+          fi
+
+          if [ "$(echo "$HTTP_BODY" | jq -r '.result // empty' 2>/dev/null)" != "success" ]; then
+            echo "::error::BuiltByBit release upload did not report success: ${HTTP_BODY}"
+            exit 1
+          fi
+
+          echo "Successfully published LeafAnvil ${VERSION} to BuiltByBit!"
+
+      - name: Create and push Git tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null \
+            || [ -n "$(git ls-remote --tags origin "refs/tags/${TAG}")" ]; then
+            echo "Tag ${TAG} already exists locally or remotely. Skipping tag creation."
+          else
+            echo "Creating and pushing tag ${TAG}..."
+            git tag -a "$TAG" -m "Release ${TAG}"
+            git push origin "$TAG"
+          fi
+
+      - name: Publish GitHub Release (ADR-126)
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: LeafAnvil ${{ steps.version.outputs.version }}
+          body_path: release-notes-anvil.md
+          prerelease: ${{ startsWith(steps.version.outputs.version, '0.') || contains(steps.version.outputs.version, 'beta') || contains(steps.version.outputs.version, 'alpha') }}
+          make_latest: false
+          files: |
+            ${{ steps.artifact.outputs.client_jar }}
+            ${{ steps.artifact.outputs.client_jar }}.sha256
+            ${{ steps.artifact.outputs.client_jar }}.sha512
+            ${{ steps.artifact.outputs.client_asc }}
+
+      - name: Publish release jar and status update to Discord (#releases)
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_GUILD_ID: ${{ secrets.DISCORD_GUILD_ID }}
+          VERSION: ${{ steps.version.outputs.version }}
+          JAR_FILE: ${{ steps.artifact.outputs.jar }}
+        run: |
+          if [ -z "$DISCORD_BOT_TOKEN" ] || [ -z "$DISCORD_GUILD_ID" ]; then
+            echo "DISCORD_BOT_TOKEN / DISCORD_GUILD_ID not set; deferring #releases post to discord_support_bot.py Option B poller."
+            exit 0
+          fi
+          python3 discord-support-bot/discord_support_bot.py \
+            --publish-release \
+            --project leafanvil \
+            --release-version "$VERSION" \
+            --release-jar "$JAR_FILE" \
+            --release-notes-file release-notes-anvil.md

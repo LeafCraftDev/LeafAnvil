@@ -1,0 +1,32 @@
+plugins {
+    id 'net.neoforged.moddev'
+}
+
+group = 'net.leaf'
+version = '0.3.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+neoForge {
+    version = '26.1.2.71'
+
+    mods {
+        leafanvil {
+            sourceSet sourceSets.main
+        }
+    }
+}
+
+dependencies {
+    implementation project(':resource:LeafAnvil:leafanvil-common')
+    implementation(project(':neoforge:neoforge-v26_1_R1')) { transitive = false }
+    compileOnly 'com.mojang:brigadier:1.3.10'
+}
+
+tasks.matching { it.name.startsWith('jacoco') }.configureEach {
+    enabled = false
+}

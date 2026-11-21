@@ -1,17 +1,180 @@
-MIT License
+SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-LeafCraft-Commercial
+Required Notice: Copyright (c) 2026 Leaf26 / LeafCraft (https://github.com/LeafCraftDev/LeafAnvil)
 
-Copyright (c) DailyStruggle (https://github.com/DailyStruggle/RTP)
+LeafAnvil Dual License (Personal / Private Testing & Commercial Server Runtime)
+===============================================================================
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+The LeafAnvil runtime plugin and mod source tree and compiled distribution
+(`LeafAnvil-<version>.jar` and `net.leaf.anvil.*` under `resource/LeafAnvil/`,
+except for the MIT-licensed components listed in Track 3 below) are
+dual-licensed under your choice of:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+  - Track 1 (Free Personal Use, Research & Private Testing —
+    `PolyForm-Noncommercial-1.0.0`): You may freely inspect, modify, compile
+    from source (`https://github.com/LeafCraftDev/LeafAnvil`), and run the
+    Software for personal singleplayer worlds, non-commercial private servers
+    with friends, local evaluation, CI/benchmarking, security auditing,
+    academic research, and noncommercial organizations under the PolyForm
+    Noncommercial License 1.0.0 set out in Part I below.
 
+  - Track 2 (Commercial Server & Network Runtime —
+    `LicenseRef-LeafCraft-Commercial`): Operating the Software on a
+    commercially monetized Minecraft server, proxy network, or hosted game
+    service requires a valid commercial license purchased from an authorized
+    LeafCraft storefront (such as BuiltByBit, Polymart, SpigotMC Premium, or a
+    direct LeafCraft agreement) under the LeafCraft Commercial Software License
+    set out in Part II below.
+
+  - Track 3 (Open `.lca` Format, `anvil-api`, `LeafAnvil-Net` & `lca-format` —
+    `MIT` Carve-Out):
+    1. World Data Ownership: Users retain 100% ownership and unrestricted
+       control over all world save files (`.lca`, `.mca`, `.linear`, and
+       backups) created, converted, compacted, or repaired by the Software.
+    2. Permissive MIT Components (`LICENSE-MIT`): The `.lca` (LeafCraft Anvil)
+       binary format Interface Control Document (`api/anvil-api/docs/ICD.md`,
+       bundled at `docs/ICD.md`, `LCA-ICD-1.0`), the `io.github.dailystruggle.anvil`
+       codec library (`api/anvil-api`), the standalone wire-streaming companion
+       mod/plugin (`:resource:LeafAnvil:leafanvil-net`, `LeafAnvil-Net-<version>.jar`),
+       and the pure-Rust `.lca` crate (`resource/LeafAnvil/rust/lca-format`) are
+       licensed separately under the MIT License (`LICENSE-MIT`), and NeoForge
+       carrier adapters in `platforms/neoforge/` remain under `GPL-3.0-or-later`
+       per their `neoforge.mods.toml`. Any developer, server fork, world
+       generator, map renderer, or external tool may freely inspect, implement,
+       bundle, or commercially use those MIT components without restriction.
+
+---
+
+Part I: PolyForm Noncommercial License 1.0.0
+============================================
+
+<https://polyformproject.org/licenses/noncommercial/1.0.0>
+
+## Acceptance
+
+In order to get any license under these terms, you must agree to them as both strict
+obligations and conditions to all your licenses.
+
+## Copyright License
+
+The licensor grants you a copyright license for the software to do everything you might
+do with the software that would otherwise infringe the licensor's copyright in it for any
+permitted purpose. However, you may only distribute the software according to
+[Distribution License](#distribution-license) and make changes or new works based on the
+software according to [Changes and New Works License](#changes-and-new-works-license).
+
+## Distribution License
+
+The licensor grants you an additional copyright license to distribute copies of the
+software. Your license to distribute covers distributing the software with changes and
+new works permitted by [Changes and New Works License](#changes-and-new-works-license).
+
+## Notices
+
+You must ensure that anyone who gets a copy of any part of the software from you also
+gets a copy of these terms or the URL for them above, as well as copies of any
+plain-text lines beginning with `Required Notice:` that the licensor provided with the
+software. For example:
+
+> Required Notice: Copyright (c) 2026 Leaf26 / LeafCraft (https://github.com/LeafCraftDev/LeafAnvil)
+
+## Changes and New Works License
+
+The licensor grants you an additional copyright license to make changes and new works
+based on the software for any permitted purpose.
+
+## Patent License
+
+The licensor grants you a patent license for the software that covers patent claims the
+licensor can license, or becomes able to license, that you would infringe by using the
+software.
+
+## Noncommercial Purposes
+
+Any noncommercial purpose is a permitted purpose.
+
+## Personal Uses
+
+Personal use for research, experiment, and testing for the benefit of public knowledge,
+personal study, private entertainment, hobby projects, amateur pursuits, or religious
+observance, without any anticipated commercial application, is use for a noncommercial
+purpose.
+
+## Noncommercial Organizations
+
+Use by any charitable organization, educational institution, public research
+organization, public safety or health organization, environmental protection
+organization, or government institution is use for a noncommercial purpose regardless of
+the source of funding or obligations resulting from the funding.
+
+## Defense
+
+You may not make any legal claim against anyone accusing the software, with or without
+changes, alone or with other technology, of infringing any patent.
+
+## Copyright
+
+The licensor retains copyright of the software, and you must not remove or alter any
+copyright notices or author attributions in the software.
+
+## Trademarks
+
+Use of any licensor's trademarks is subject to applicable law.
+
+## No Liability
+
+***As far as the law allows, the software comes as is, without any warranty or
+condition, and the licensor will not be liable to you for any damages arising out of
+these terms or the use or nature of the software, under any kind of legal claim.***
+
+## Definitions
+
+The **licensor** is the individual or entity offering these terms, and the **software**
+is the software the licensor makes available under these terms.
+
+**You** refers to the individual or entity agreeing to these terms.
+
+**Your company** is any legal entity, sole proprietorship, or other kind of organization
+that you work for, plus all organizations that have control over, are under the control
+of, or are under common control with that organization. **Control** means ownership of
+substantially all the assets of an entity, or the power to direct its management and
+legal affairs.
+
+**Your licenses** are all the licenses granted to you for the software under these
+terms.
+
+**Use** means anything you do with the software requiring one of your licenses.
+
+**Trademark** means trademarks, service marks, and similar rights.
+
+---
+
+Part II: LeafCraft Commercial Software License (LicenseRef-LeafCraft-Commercial)
+================================================================================
+
+Copyright (c) 2026 Leaf26 / LeafCraft. All rights reserved.
+
+1. Commercial Server & Network License Grant
+Subject to purchase of a valid license from an authorized LeafCraft storefront
+(such as BuiltByBit, Polymart, SpigotMC Premium, or an official LeafCraft
+distribution channel), the copyright holder grants the purchaser ("Licensee")
+a non-exclusive, worldwide, perpetual license to install, configure, compile,
+and execute the Software (`LeafAnvil-<version>.jar` and `net.leaf.anvil.*`) on
+Minecraft servers and proxy networks owned or operated by the Licensee,
+including commercially monetized servers and networks.
+
+2. Restrictions on Commercial Binary Redistribution & Resale
+Except as permitted under Part I (noncommercial source distribution complying
+with PolyForm Noncommercial License 1.0.0) or Track 3 (MIT-licensed `.lca`
+`ICD.md`, `anvil-api`, `LeafAnvil-Net`, and `rust/lca-format`), a commercial
+Licensee may NOT:
+  (a) redistribute, republish, upload, mirror, sublicense, rent, lease, or
+      resell pre-built commercial `LeafAnvil-<version>.jar` binaries;
+  (b) publish copies of `LeafAnvil` for commercial use on public plugin/mod
+      marketplaces without authorization; or
+  (c) remove or alter copyright notices, license files, or attribution metadata
+      packaged within the Software.
+
+3. Disclaimer of Warranty & Limitation of Liability
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE

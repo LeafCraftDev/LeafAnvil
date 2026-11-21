@@ -1,0 +1,7 @@
+name: LeafAnvil-Net
+version: 0.3.0
+main: net.leaf.anvil.paper.PaperLeafAnvilPlugin
+api-version: '1.20'
+load: STARTUP
+folia-supported: true
+description: Free MIT-licensed server TX plugin for negotiated LCA_NET_V1 .lca chunk streaming, revisit delta caching, and RAM section compaction without modifying world save files.

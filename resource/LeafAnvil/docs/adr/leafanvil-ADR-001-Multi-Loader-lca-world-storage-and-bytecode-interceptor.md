@@ -1,6 +1,6 @@
 # leafanvil-ADR-001: Multi-Loader `.lca` World Storage Carrier, Runtime `RegionFileStorage` Bytecode Interception & Reversible Migration (`LeafAnvil`)
 
-- **Status:** Accepted
+- **Status:** Accepted (Section 5 amended 2026-11-18 by [`leafanvil-ADR-008`](leafanvil-ADR-008-source-available-personal-testing-and-commercial-dual-licensing.md): full source published on `LeafCraftDev/LeafAnvil` under `PolyForm-Noncommercial-1.0.0 OR LicenseRef-LeafCraft-Commercial`)
 - **Date:** 2026-10-31
 - **Extends:** [`anvil-api-ADR-002`](../../../../api/anvil-api/docs/adr/anvil-api-ADR-002-multi-format-region-support.md), [`anvil-api-ADR-003`](../../../../api/anvil-api/docs/adr/anvil-api-ADR-003-hilbert-roaring-gray-chunk-archive.md), [`ADR-115`](../../../../docs/adr/ADR-115-package-dag-disentanglement-and-decision-preservation-hypergraph.md), [`ADR-126`](../../../../docs/adr/ADR-126-multi-product-monorepo-release-architecture.md)
 
@@ -41,9 +41,9 @@ Provide **`LeafAnvil` (`resource/LeafAnvil`)** as a multi-loader plugin and mod 
 4. **Reversible Batch Conversion, Compaction & 4-Tier Self-Healing (`LeafAnvilWorldConverter`, `LeafAnvilCommand`):**
    - `/leafanvil` (alias `/lca`) exposes `status`, `convert [world=<name|all>] [format=<lca|mca>]`, `compact [world=<name|all>]`, `heal [world=<name|all>]`, and `reload` via `CommandsAPI` (`commands-api-ADR-001`), executing batch disk tasks asynchronously off the main thread (`REQ-RTP-S-005`) behind an `AtomicBoolean` single-flight guard (`REQ-RTP-S-007`).
 
-5. **Commercial Carrier Licensing with Open `.lca` Format & `anvil-api` Carve-Out:**
-   - The `LeafAnvil` runtime carrier (`resource/LeafAnvil`, `net.leaf.anvil.*`, and `LeafAnvil-<version>.jar`) is a commercial product governed by `resource/LeafAnvil/LICENSE` (`LicenseRef-LeafCraft-Commercial`, packaged at `META-INF/leafanvil/LICENSE`) and guarded as a private path in `scripts/pre_push_guard.py`.
-   - The `.lca` binary format Interface Control Document ([`api/anvil-api/docs/ICD.md`](../../../../api/anvil-api/docs/ICD.md), routed from `resource/LeafAnvil/docs/ICD.md` and packaged directly into `LeafAnvil-<version>.jar`, `LCA-ICD-1.0`) and the `io.github.dailystruggle.anvil` codec library (`api/anvil-api`) remain licensed under the **MIT License** so `LeafRTP`, world generators, server forks, map renderers, and third-party tools can freely read, write, or reverse-engineer `.lca` for ecosystem interoperability.
+5. **Dual-Licensed Source-Available Carrier (`PolyForm-Noncommercial-1.0.0 OR LicenseRef-LeafCraft-Commercial`) with Open `.lca` Format & `anvil-api` Carve-Out ([`leafanvil-ADR-008`](leafanvil-ADR-008-source-available-personal-testing-and-commercial-dual-licensing.md)):**
+   - The `LeafAnvil` runtime carrier (`resource/LeafAnvil`, `net.leaf.anvil.*`, and `LeafAnvil-<version>.jar`) is published in full to `LeafCraftDev/LeafAnvil` (`sync_public_oss_pr.py --target anvil`) under `resource/LeafAnvil/LICENSE` (`PolyForm-Noncommercial-1.0.0 OR LicenseRef-LeafCraft-Commercial`, packaged at `META-INF/leafanvil/LICENSE`): free to inspect, modify, build from source, and run for personal use, research, and private testing under `PolyForm-Noncommercial-1.0.0`, and commercially licensed via BuiltByBit / LeafCraft (`LicenseRef-LeafCraft-Commercial`) for monetized servers and networks.
+   - The `.lca` binary format Interface Control Document ([`api/anvil-api/docs/ICD.md`](../../../../api/anvil-api/docs/ICD.md), routed from `resource/LeafAnvil/docs/ICD.md` and packaged directly into `LeafAnvil-<version>.jar`, `LCA-ICD-1.0`), `LeafAnvil-Net` (`:resource:LeafAnvil:leafanvil-net`), `resource/LeafAnvil/rust/lca-format`, and the `io.github.dailystruggle.anvil` codec library (`api/anvil-api`) remain licensed under the **MIT License** so `LeafRTP`, world generators, server forks, map renderers, and third-party tools can freely read, write, or reverse-engineer `.lca` for ecosystem interoperability.
 
 ## Consequences
 

@@ -1,0 +1,26 @@
+modLoader = "javafml"
+loaderVersion = "[1,)"
+license = "MIT"
+
+[[mods]]
+modId = "leafanvil_net"
+version = "0.3.0"
+displayName = "LeafAnvil Net"
+description = "Free MIT-licensed server TX + client RX mod for LeafAnvil LCA_NET_V1 .lca chunk streaming, revisit delta caching, and RAM section compaction."
+
+[[mixins]]
+config = "leafanvil-net.neoforge.mixins.json"
+
+[[dependencies.leafanvil_net]]
+modId = "neoforge"
+type = "required"
+versionRange = "[26.1,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.leafanvil_net]]
+modId = "minecraft"
+type = "required"
+versionRange = "[26.1,)"
+ordering = "NONE"
+side = "BOTH"

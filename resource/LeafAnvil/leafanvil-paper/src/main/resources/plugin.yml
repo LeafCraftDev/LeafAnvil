@@ -1,0 +1,11 @@
+name: LeafAnvil
+version: 0.3.0
+main: net.leaf.anvil.paper.PaperLeafAnvilPlugin
+api-version: '1.20'
+load: STARTUP
+folia-supported: true
+description: Zero-fork .lca (LeafCraft Anvil) world save format plugin & converter for Paper, Folia, and Spigot.
+permissions:
+  leafanvil.admin:
+    description: Allows executing /leafanvil (/lca) status, convert, compact, heal, and reload commands.
+    default: op

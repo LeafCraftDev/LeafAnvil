@@ -1,0 +1,26 @@
+modLoader = "javafml"
+loaderVersion = "[1,)"
+license = "PolyForm-Noncommercial-1.0.0 OR LicenseRef-LeafCraft-Commercial"
+
+[[mods]]
+modId = "leafanvil"
+version = "0.3.0"
+displayName = "LeafAnvil"
+description = "Zero-fork .lca (LeafCraft Anvil) world save format mod & converter."
+
+[[mixins]]
+config = "leafanvil.mixins.json"
+
+[[dependencies.leafanvil]]
+modId = "neoforge"
+type = "required"
+versionRange = "[26.1,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.leafanvil]]
+modId = "minecraft"
+type = "required"
+versionRange = "[26.1,)"
+ordering = "NONE"
+side = "BOTH"
