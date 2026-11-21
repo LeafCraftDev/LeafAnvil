@@ -990,4 +990,337 @@ public class LeafAnvilInterceptorAndConverterTest {
             coord.shutdownCompactionPool();
         }
     }
+
+    public static final class SyntheticBitStorage {
+        private final int bits;
+        private final long[] raw;
+
+        public SyntheticBitStorage(int bits, long[] raw) {
+            this.bits = bits;
+            this.raw = raw;
+        }
+
+        public int getBits() {
+            return bits;
+        }
+
+        public long[] getRaw() {
+            return raw;
+        }
+    }
+
+    public static final class SyntheticPalette {
+        private final Object[] values;
+
+        public SyntheticPalette(Object... values) {
+            this.values = values;
+        }
+
+        public Object valueFor(int idx) {
+            return values[idx];
+        }
+
+        public int getSize() {
+            return values.length;
+        }
+    }
+
+    public static final class SyntheticContainerData {
+        public final SyntheticBitStorage storage;
+        public final SyntheticPalette palette;
+
+        public SyntheticContainerData(SyntheticBitStorage storage, SyntheticPalette palette) {
+            this.storage = storage;
+            this.palette = palette;
+        }
+    }
+
+    public static final class SyntheticPalettedContainer {
+        public SyntheticContainerData data;
+
+        public SyntheticPalettedContainer(SyntheticContainerData data) {
+            this.data = data;
+        }
+    }
+
+    public static final class SyntheticNmsSection {
+        public short nonEmptyBlockCount;
+        public short tickingBlockCount;
+        public short tickingFluidCount;
+        private final SyntheticPalettedContainer states;
+
+        public SyntheticNmsSection(
+                short nonEmptyBlockCount,
+                short tickingBlockCount,
+                short tickingFluidCount,
+                SyntheticPalettedContainer states
+        ) {
+            this.nonEmptyBlockCount = nonEmptyBlockCount;
+            this.tickingBlockCount = tickingBlockCount;
+            this.tickingFluidCount = tickingFluidCount;
+            this.states = states;
+        }
+
+        public SyntheticPalettedContainer getStates() {
+            return states;
+        }
+    }
+
+    @Test
+    @DisplayName("LcaSectionBridge ZeroBitShellEvictor inspects synthetic NMS containers, snapshots 0-bit and paletted sections, and verifies RawSectionSnapshot value semantics")
+    void sectionBridgeZeroBitShellEvictorAndSnapshotValueSemantics() {
+        assertFalse(LcaSectionBridge.isSuppressCopyHydrationForDirectSave());
+        LcaSectionBridge.setSuppressCopyHydrationForDirectSave(true);
+        assertTrue(LcaSectionBridge.isSuppressCopyHydrationForDirectSave());
+        LcaSectionBridge.setSuppressCopyHydrationForDirectSave(false);
+        assertFalse(LcaSectionBridge.isSuppressCopyHydrationForDirectSave());
+
+        assertNull(LcaSectionBridge.ZeroBitShellEvictor.inspectNmsSectionCountsOrNull(null));
+        assertNull(LcaSectionBridge.ZeroBitShellEvictor.inspectNmsSectionCountsOrNull("not-a-section"));
+
+        // 0-bit uniform section
+        SyntheticPalettedContainer uniformContainer = new SyntheticPalettedContainer(
+                new SyntheticContainerData(new SyntheticBitStorage(0, new long[0]), new SyntheticPalette(Integer.valueOf(7))));
+        SyntheticNmsSection uniformSection = new SyntheticNmsSection((short) 4096, (short) 2, (short) 1, uniformContainer);
+
+        int[] counts = LcaSectionBridge.ZeroBitShellEvictor.inspectNmsSectionCountsOrNull(uniformSection);
+        assertNotNull(counts);
+        assertEquals(4096, counts[0]);
+        assertEquals(2, counts[1]);
+        assertEquals(1, counts[2]);
+
+        LcaSectionBridge.RawSectionSnapshot uniformSnap = LcaSectionBridge.ZeroBitShellEvictor.captureRawSectionSnapshot(
+                3, uniformSection, o -> ((Integer) o), 4096, 2, 1, 15);
+        assertNotNull(uniformSnap);
+        assertTrue(uniformSnap.uniform());
+        assertEquals(7, uniformSnap.uniformStateId());
+
+        // 4-bit paletted section
+        long[] packed = new long[256];
+        packed[0] = 0x1010_0101L;
+        SyntheticPalettedContainer palContainer = new SyntheticPalettedContainer(
+                new SyntheticContainerData(
+                        new SyntheticBitStorage(4, packed),
+                        new SyntheticPalette(Integer.valueOf(0), Integer.valueOf(12), Integer.valueOf(34))));
+        SyntheticNmsSection palSection = new SyntheticNmsSection((short) 128, (short) 4, (short) 0, palContainer);
+
+        assertEquals(256 * 8, LcaSectionBridge.ZeroBitShellEvictor.inspectRawLongArrayBytes(palSection));
+        assertEquals(256 * 8, LcaSectionBridge.ZeroBitShellEvictor.inspectRawLongArrayBytes(palContainer));
+        assertEquals(0, LcaSectionBridge.ZeroBitShellEvictor.inspectRawLongArrayBytes(null));
+
+        LcaSectionBridge.RawSectionSnapshot palSnap = LcaSectionBridge.ZeroBitShellEvictor.captureRawSectionSnapshot(
+                5, palSection, o -> ((Integer) o), 128, 4, 0, 14);
+        assertNotNull(palSnap);
+        assertFalse(palSnap.uniform());
+        assertEquals(4, palSnap.bitsPerEntry());
+        assertEquals(3, palSnap.paletteStateIds().length);
+        assertEquals(34, palSnap.paletteStateIds()[2]);
+
+        // RawSectionSnapshot equals / hashCode / toString coverage
+        LcaSectionBridge.RawSectionSnapshot palSnapCopy = new LcaSectionBridge.RawSectionSnapshot(
+                5, false, 0, 4, packed.clone(), new int[]{0, 12, 34}, 128, 4, 0, 14);
+        Object selfRef = palSnap;
+        assertEquals(palSnap, selfRef);
+        assertEquals(palSnap, palSnapCopy);
+        assertEquals(palSnap.hashCode(), palSnapCopy.hashCode());
+        assertTrue(palSnap.toString().contains("sectionIndex=5"));
+        assertFalse(palSnap.equals(null));
+        assertFalse(palSnap.equals("other"));
+        assertFalse(palSnap.equals(uniformSnap));
+
+        // Default bridge methods
+        final io.github.dailystruggle.anvil.LcaSectionBacking[] holder =
+                new io.github.dailystruggle.anvil.LcaSectionBacking[1];
+        LcaSectionBridge bridge = new LcaSectionBridge() {
+            @Override
+            public io.github.dailystruggle.anvil.LcaSectionBacking leafanvil$getBacking() {
+                return holder[0];
+            }
+
+            @Override
+            public void leafanvil$setBacking(io.github.dailystruggle.anvil.LcaSectionBacking backing) {
+                holder[0] = backing;
+            }
+        };
+        assertEquals(-1, bridge.leafanvil$getStateId(0, 0, 0));
+        assertEquals(-1, bridge.leafanvil$setAndGetPreviousStateId(0, 0, 0, 5, 1L));
+        assertFalse(bridge.leafanvil$isZeroBitShellEvicted());
+        assertEquals(0, bridge.leafanvil$evictToZeroBitShell());
+        bridge.leafanvil$setBacking(new io.github.dailystruggle.anvil.LcaSectionBacking(new byte[0], 3), true);
+        assertEquals(3, bridge.leafanvil$getStateId(16, 32, 48));
+        assertEquals(3, bridge.leafanvil$setAndGetPreviousStateId(16, 32, 48, 9, 2L));
+        assertEquals(9, bridge.leafanvil$getStateId(0, 0, 0));
+    }
+
+    @Test
+    @DisplayName("LeafAnvilCommand exposes metadata and executes status, bit, reload, pause, resume, cancel, and compact subcommands")
+    void leafAnvilCommandMetadataAndSubcommandDispatch(@TempDir Path tempDir) throws Exception {
+        Path dataDir = tempDir.resolve("cmd_data");
+        Files.createDirectories(dataDir);
+        ServerAccessor accessor = Mockito.mock(ServerAccessor.class);
+        Mockito.when(accessor.getRootFolder()).thenReturn(dataDir);
+        Mockito.when(accessor.scheduler()).thenReturn(Optional.empty());
+        Mockito.when(accessor.isPrimaryThread()).thenReturn(false);
+
+        try (LeafAnvilRuntime runtime = new LeafAnvilRuntime(accessor)) {
+            runtime.start();
+            LeafAnvilCommand cmd = new LeafAnvilCommand("leafanvil", accessor, runtime);
+            assertEquals("leafanvil", cmd.name());
+            assertEquals("leafanvil.admin", cmd.permission());
+            assertFalse(cmd.description().isBlank());
+            assertNull(cmd.parent());
+            assertEquals(0L, cmd.avgTime());
+            assertNotNull(cmd.getParameterLookup());
+            assertTrue(cmd.getCommandLookup().size() >= 9);
+
+            UUID sender = UUID.randomUUID();
+            assertTrue(cmd.onCommand(sender, Map.of(), null));
+            for (io.github.dailystruggle.commandsapi.common.CommandsAPICommand sub : cmd.getCommandLookup().values()) {
+                assertNotNull(sub.name());
+                assertNotNull(sub.permission());
+                assertNotNull(sub.description());
+                assertEquals(cmd, sub.parent());
+                assertEquals(0L, sub.avgTime());
+                Map<String, List<String>> params = "convert".equalsIgnoreCase(sub.name())
+                        ? Map.of("world", List.of("all"), "format", List.of("lca"), "workers", List.of("auto"))
+                        : ("heal".equalsIgnoreCase(sub.name())
+                                ? Map.of("world", List.of("all"), "workers", List.of("2"))
+                                : Map.of());
+                sub.onCommand(sender, params, null);
+            }
+            cmd.msgNoPermission(sender, "leafanvil.admin");
+            cmd.msgInvalidCommand(sender, "bogus");
+            cmd.msgBadParameter(sender, "workers", "999");
+        }
+    }
+
+    @Test
+    @DisplayName("LcaInMemoryChunkCoordinator compaction, CoW save tickets, AIMD decay, and transformer/profiler helpers")
+    void coordinatorCompactionCowSaveTicketsAndAuxiliaryHelpers(@TempDir Path tempDir) throws Exception {
+        Path regionDir = Files.createDirectories(tempDir.resolve("region"));
+        try (LcaRegionFileStorage storage = new LcaRegionFileStorage(regionDir)) {
+            LcaInMemoryChunkCoordinator coord = new LcaInMemoryChunkCoordinator(
+                    new net.leaf.anvil.common.net.LcaWireStreamProtocol.ClientChunkSlabCache(64), true);
+            try {
+                // Build a minimal real .lca chunk frame via LcaRegionFileStorage so coldSnapshot + CoW splice work end-to-end
+                LinkedHashMap<String, Object> chunkRoot = new LinkedHashMap<>();
+                chunkRoot.put("DataVersion", 4671);
+                chunkRoot.put("xPos", 0);
+                chunkRoot.put("zPos", 0);
+                chunkRoot.put("yPos", -4);
+                chunkRoot.put("Status", "minecraft:full");
+                chunkRoot.put("LastUpdate", 10L);
+                chunkRoot.put("InhabitedTime", 0L);
+                byte[] nbtBytes = Nbt.writeNamedRoot("", chunkRoot);
+                storage.writeChunkNbtBytes(0, 0, nbtBytes);
+
+                io.github.dailystruggle.anvil.RawChunkFrameSnapshot coldSnap = storage.readRawChunkFrame(0, 0, null);
+                assertNotNull(coldSnap);
+
+                LcaInMemoryChunkCoordinator.TrackedChunkColumn col = coord.attachColdChunkFrameColumn(
+                        "minecraft:overworld", 0, 0, coldSnap, null, 10L, false);
+                col.bindColdChunkFrame(coldSnap, storage, null, id -> "minecraft:stone");
+
+                // Mutate section 4 and exercise AIMD decay + quiet-window compaction + background compaction
+                col.mutateVoxel(4, 1, 2, 3, 55, 10L);
+                coord.decayDirtyChunkScores();
+
+                int compacted = coord.compactReadySectionsInChunk(
+                        "minecraft:overworld", 0, 0, 500L, 10L, snap -> new byte[]{0x00, 0x01, 0x01});
+                assertTrue(compacted >= 1);
+
+                // Mutate again and schedule background overlay compaction + CoW save ticket
+                col.mutateVoxel(5, 2, 3, 4, 77, 510L);
+                int scheduled = coord.scheduleBackgroundOverlayCompaction(900L, 10L, 4, 15);
+                assertTrue(scheduled >= 0);
+
+                LcaInMemoryChunkCoordinator.DirectCoWSaveTicket ticket =
+                        coord.captureDirectCoWSaveTicket("minecraft:overworld", 0, 0);
+                assertNotNull(ticket);
+                Object ticketSelf = ticket;
+                assertEquals(ticket, ticketSelf);
+                assertEquals(ticket.hashCode(), ticketSelf.hashCode());
+                assertTrue(ticket.toString().contains("DirectCoWSaveTicket"));
+                assertFalse(ticket.equals(null));
+                assertTrue(coord.commitDirectCoWSaveTicketSync(ticket));
+                assertFalse(coord.commitDirectCoWSaveTicketSync(null));
+
+                // Exercise commitOrSpliceColdColumnToStorage on clean & dirty column
+                col.mutateVoxel(6, 0, 0, 0, 88, 950L);
+                assertTrue(coord.commitOrSpliceColdColumnToStorage("minecraft:overworld", 0, 0, null, 960L));
+                assertFalse(coord.commitOrSpliceColdColumnToStorage("minecraft:overworld", 99, 99, null, 960L));
+
+                // Deferred chunk load queue compaction
+                assertTrue(coord.enqueuePendingChunkLoad("minecraft:overworld", 2, 3, new Object(), 100L));
+                List<LcaInMemoryChunkCoordinator.PendingChunkLoad> drainedLoads = new ArrayList<>();
+                assertEquals(0, coord.tickDeferredChunkCompaction(105L, 20L, 4, drainedLoads::add));
+                assertEquals(1, coord.tickDeferredChunkCompaction(200L, 20L, 4, drainedLoads::add));
+                assertEquals(1, drainedLoads.size());
+
+                // Coordinator record value semantics
+                Object[] nmsSecs = new Object[0];
+                LcaSectionBridge.RawSectionSnapshot[] snaps = new LcaSectionBridge.RawSectionSnapshot[0];
+                io.github.dailystruggle.anvil.LcaSectionBacking[] backings =
+                        new io.github.dailystruggle.anvil.LcaSectionBacking[0];
+                LcaInMemoryChunkCoordinator.CompletedChunkCompaction cc1 =
+                        new LcaInMemoryChunkCoordinator.CompletedChunkCompaction(
+                                "world", 1, 2, null, nmsSecs, snaps, backings, 10L, null);
+                LcaInMemoryChunkCoordinator.CompletedChunkCompaction cc2 =
+                        new LcaInMemoryChunkCoordinator.CompletedChunkCompaction(
+                                "world", 1, 2, null, nmsSecs, snaps, backings, 10L, null);
+                Object ccSelf = cc1;
+                assertEquals(cc1, ccSelf);
+                assertEquals(cc1, cc2);
+                assertEquals(cc1.hashCode(), cc2.hashCode());
+                assertTrue(cc1.toString().contains("chunkX=1"));
+                assertFalse(cc1.equals(new LcaInMemoryChunkCoordinator.CompletedChunkCompaction(
+                        "world", 9, 2, null, nmsSecs, snaps, backings, 10L, null)));
+
+                net.leaf.anvil.common.net.LcaWireStreamProtocol.ClientboundLcaChunkBatchPayload emptyBatch =
+                        new net.leaf.anvil.common.net.LcaWireStreamProtocol.ClientboundLcaChunkBatchPayload(
+                                1, 2, List.of(new net.leaf.anvil.common.net.LcaWireStreamProtocol.EntryCleanAck(0)));
+                LcaInMemoryChunkCoordinator.RegionPackedBatchFrame rbf1 =
+                        new LcaInMemoryChunkCoordinator.RegionPackedBatchFrame(
+                                1, 2, emptyBatch, new byte[]{4, 5}, new byte[]{6, 7}, List.of(), 0, 0, 1);
+                LcaInMemoryChunkCoordinator.RegionPackedBatchFrame rbf2 =
+                        new LcaInMemoryChunkCoordinator.RegionPackedBatchFrame(
+                                1, 2, emptyBatch, new byte[]{4, 5}, new byte[]{6, 7}, List.of(), 0, 0, 1);
+                Object rbfSelf = rbf1;
+                assertEquals(rbf1, rbfSelf);
+                assertEquals(rbf1, rbf2);
+                assertEquals(rbf1.hashCode(), rbf2.hashCode());
+                assertTrue(rbf1.toString().contains("regionX=1"));
+                assertFalse(rbf1.equals(new LcaInMemoryChunkCoordinator.RegionPackedBatchFrame(
+                        9, 2, emptyBatch, new byte[]{4, 5}, new byte[]{6, 7}, List.of(), 0, 0, 1)));
+
+                LcaInMemoryChunkCoordinator.InterServerSectionBlockCommit isc1 =
+                        new LcaInMemoryChunkCoordinator.InterServerSectionBlockCommit("world", 1, 2, 3, new int[]{10, 20}, 99L);
+                LcaInMemoryChunkCoordinator.InterServerSectionBlockCommit isc2 =
+                        new LcaInMemoryChunkCoordinator.InterServerSectionBlockCommit("world", 1, 2, 3, new int[]{10, 20}, 99L);
+                Object iscSelf = isc1;
+                assertEquals(isc1, iscSelf);
+                assertEquals(isc1, isc2);
+                assertEquals(isc1.hashCode(), isc2.hashCode());
+                assertTrue(isc1.toString().contains("sectionIndex=3"));
+                assertFalse(isc1.equals(new LcaInMemoryChunkCoordinator.InterServerSectionBlockCommit(
+                        "world", 1, 2, 4, new int[]{10, 20}, 99L)));
+
+                // Profiler resetAll + transformer non-matching class passthrough
+                net.leaf.anvil.common.net.LcaPacketDifferentialProfiler prof =
+                        new net.leaf.anvil.common.net.LcaPacketDifferentialProfiler();
+                prof.recordPacketDifferential(
+                        net.leaf.anvil.common.net.LcaPacketDifferentialProfiler.BUCKET_CHUNK_STREAM,
+                        1, 500, 500, 1, 1, 100, 1);
+                prof.resetAll();
+                assertEquals(0L, prof.snapshot(1).totalVanillaPackets());
+
+                net.leaf.anvil.agent.LeafAnvilSectionClassTransformer xform =
+                        new net.leaf.anvil.agent.LeafAnvilSectionClassTransformer();
+                assertNull(xform.transform(null, "java/lang/String", null, null, new byte[]{1, 2, 3}));
+                assertNull(xform.transform(null, null, null, null, new byte[]{1, 2, 3}));
+            } finally {
+                coord.shutdownCompactionPool();
+            }
+        }
+    }
 }

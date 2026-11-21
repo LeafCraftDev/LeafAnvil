@@ -464,6 +464,63 @@ class LeafAnvilAgentClassLoaderBridgeTest {
                 "Repeated mismatch on same class must emit exactly one structured WARNING");
     }
 
+    @Test
+    @DisplayName("LeafAnvilAgentBootstrap CarrierState rehashes across all capacity tiers and handles hook faults fail-closed")
+    void agentBootstrapCarrierStateRehashAndHookFallbacks() throws Throwable {
+        LeafAnvilAgentBootstrap.resetAgentActiveForTest();
+        assertFalse(LeafAnvilAgentBootstrap.isAgentActive());
+        LeafAnvilAgentBootstrap.markAgentActive();
+        assertTrue(LeafAnvilAgentBootstrap.isAgentActive());
+        LeafAnvilAgentBootstrap.resetAgentActiveForTest();
+
+        Object state = LeafAnvilAgentBootstrap.mountBaseFrame(null, null, new byte[]{1, 2, 3}, 7, 4671, 0x1234L);
+        assertEquals(0, LeafAnvilAgentBootstrap.getDirtyCount(state));
+        assertEquals(0, LeafAnvilAgentBootstrap.snapshotDirtyOverlay(state).length);
+        assertEquals(0, LeafAnvilAgentBootstrap.getDirtyCount(null));
+        assertEquals(0, LeafAnvilAgentBootstrap.snapshotDirtyOverlay(null).length);
+
+        // Grow through 0 -> 16 -> 64 -> 256 -> 1024 -> 8192 open-addressing hash table capacities
+        for (int pos = 0; pos < 900; pos++) {
+            state = LeafAnvilAgentBootstrap.recordCarrierMutation(null, state, pos, 0, pos + 1, pos);
+        }
+        // Overwrite existing entry in large table and verify size does not grow
+        state = LeafAnvilAgentBootstrap.recordCarrierMutation(null, state, 42, 43, 999, 901L);
+        assertEquals(900, LeafAnvilAgentBootstrap.getDirtyCount(state));
+        assertEquals(900, LeafAnvilAgentBootstrap.snapshotDirtyOverlay(state).length);
+
+        // Same-reference and equal-state short-circuits on onSectionSetBlockState
+        SyntheticBlockState stone = new SyntheticBlockState(1);
+        assertSame(state, LeafAnvilAgentBootstrap.onSectionSetBlockState(null, state, 1, 2, 3, stone, stone));
+        state = LeafAnvilAgentBootstrap.onSectionSetBlockState(null, state, 1, 2, 3, stone, new SyntheticBlockState(2));
+        assertTrue(LeafAnvilAgentBootstrap.getDirtyCount(state) >= 900);
+
+        state = LeafAnvilAgentBootstrap.clearDirtyAfterCompaction(state, new byte[]{9, 8}, 0x9999L);
+        assertEquals(0, LeafAnvilAgentBootstrap.getDirtyCount(state));
+
+        // Null and throwing hook fallbacks must return null without throwing (S-004)
+        LeafAnvilAgentBootstrap.clearHooks();
+        assertNull(LeafAnvilAgentBootstrap.directChunkSerializeHook());
+        assertNull(LeafAnvilAgentBootstrap.directChunkHydrateHook());
+        assertNull(LeafAnvilAgentBootstrap.sectionMutationListener());
+        assertNull(LeafAnvilAgentBootstrap.tryDirectSerialize1("self"));
+        assertNull(LeafAnvilAgentBootstrap.tryDirectSerialize2("lvl", "chk"));
+        assertNull(LeafAnvilAgentBootstrap.tryDirectHydrate3("a", "b", "c"));
+
+        MethodHandle throwing2 = MethodHandles.dropArguments(
+                MethodHandles.throwException(Object.class, IllegalStateException.class)
+                        .bindTo(new IllegalStateException("boom")),
+                0, Object.class, Object.class);
+        MethodHandle throwing3 = MethodHandles.dropArguments(
+                MethodHandles.throwException(Object.class, IllegalStateException.class)
+                        .bindTo(new IllegalStateException("boom")),
+                0, Object.class, Object.class, Object.class);
+        LeafAnvilAgentBootstrap.registerChunkCodecHooks(throwing2, throwing3, null);
+        assertNull(LeafAnvilAgentBootstrap.tryDirectSerialize1("self"));
+        assertNull(LeafAnvilAgentBootstrap.tryDirectSerialize2("lvl", "chk"));
+        assertNull(LeafAnvilAgentBootstrap.tryDirectHydrate3("a", "b", "c"));
+        LeafAnvilAgentBootstrap.clearHooks();
+    }
+
     public static int extractSyntheticStateId(Object stateObj) {
         return (stateObj instanceof SyntheticBlockState s) ? s.runtimeId : 0;
     }

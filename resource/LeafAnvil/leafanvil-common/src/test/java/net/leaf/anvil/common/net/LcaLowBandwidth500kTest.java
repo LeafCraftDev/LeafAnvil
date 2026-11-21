@@ -773,4 +773,132 @@ class LcaLowBandwidth500kTest {
         }
         return coordinator.attachChunkColumn(OVERWORLD, chunkX, chunkZ, sections, null, 100L, false);
     }
+
+    @Test
+    @DisplayName("Wire protocol, profiler, orderless dictionary, and multi-target records implement array-aware value semantics")
+    void wireProtocolAndProfilerRecordValueSemantics() {
+        LcaPacketDifferentialProfiler profiler = new LcaPacketDifferentialProfiler();
+        profiler.recordPacketDifferential(
+                LcaPacketDifferentialProfiler.BUCKET_CHUNK_STREAM, 2, 1000, 900, 2, 1, 120, 1);
+        DifferentialSnapshot snap1 = profiler.snapshot(4);
+        DifferentialSnapshot snap2 = profiler.snapshot(4);
+        Object snapSelf = snap1;
+        assertEquals(snap1, snapSelf);
+        assertEquals(snap1, snap2);
+        assertEquals(snap1.hashCode(), snap2.hashCode());
+        assertTrue(snap1.toString().contains("activePlayers=4"));
+        assertTrue(snap1.toJson().contains("\"activePlayers\":4"));
+        assertTrue(snap1.fitsPractical500kUplink());
+        assertFalse(snap1.equals(null));
+        assertFalse(snap1.equals("other"));
+        assertFalse(snap1.equals(profiler.snapshot(5)));
+
+        DictSlotEntry d1 = new DictSlotEntry(1, (byte) 2, (byte) 3, new byte[]{4, 5});
+        DictSlotEntry d2 = new DictSlotEntry(1, (byte) 2, (byte) 3, new byte[]{4, 5});
+        Object dSelf = d1;
+        assertEquals(d1, dSelf);
+        assertEquals(d1, d2);
+        assertEquals(d1.hashCode(), d2.hashCode());
+        assertTrue(d1.toString().contains("slotId12=1"));
+        assertFalse(d1.equals(null));
+        assertFalse(d1.equals(new DictSlotEntry(2, (byte) 2, (byte) 3, new byte[]{4, 5})));
+
+        LcaOrderlessDictTable.DictLearnEntry l1 =
+                new LcaOrderlessDictTable.DictLearnEntry(1, (byte) 2, (byte) 3, new byte[]{7, 8});
+        LcaOrderlessDictTable.DictLearnEntry l2 =
+                new LcaOrderlessDictTable.DictLearnEntry(1, (byte) 2, (byte) 3, new byte[]{7, 8});
+        Object lSelf = l1;
+        assertEquals(l1, lSelf);
+        assertEquals(l1, l2);
+        assertEquals(l1.hashCode(), l2.hashCode());
+        assertTrue(l1.toString().contains("slotId12=1"));
+        assertFalse(l1.equals(new LcaOrderlessDictTable.DictLearnEntry(1, (byte) 2, (byte) 3, new byte[]{7, 9})));
+
+        KnownSlotBitSet ks = new KnownSlotBitSet();
+        OrderlessEncodedBatch b1 = new OrderlessEncodedBatch(new byte[]{1, 2}, 100, 1, 2, 3, ks);
+        OrderlessEncodedBatch b2 = new OrderlessEncodedBatch(new byte[]{1, 2}, 100, 1, 2, 3, ks);
+        Object bSelf = b1;
+        assertEquals(b1, bSelf);
+        assertEquals(b1, b2);
+        assertEquals(b1.hashCode(), b2.hashCode());
+        assertTrue(b1.toString().contains("originalRawBytes=100"));
+        assertFalse(b1.equals(new OrderlessEncodedBatch(new byte[]{1, 3}, 100, 1, 2, 3, ks)));
+
+        SectionWireSlice s1 = new SectionWireSlice(0, (short) 1, new byte[]{3, 4}, new int[]{5, 6});
+        SectionWireSlice s2 = new SectionWireSlice(0, (short) 1, new byte[]{3, 4}, new int[]{5, 6});
+        Object sSelf = s1;
+        assertEquals(s1, sSelf);
+        assertEquals(s1, s2);
+        assertEquals(s1.hashCode(), s2.hashCode());
+        assertTrue(s1.toString().contains("sectionIndex=0"));
+        assertFalse(s1.equals(new SectionWireSlice(1, (short) 1, new byte[]{3, 4}, new int[]{5, 6})));
+
+        LcaWireStreamProtocol.LcaRegionDictSyncPayload r1 =
+                new LcaWireStreamProtocol.LcaRegionDictSyncPayload(1, 2, new int[]{10, 20}, new int[]{30});
+        LcaWireStreamProtocol.LcaRegionDictSyncPayload r2 =
+                new LcaWireStreamProtocol.LcaRegionDictSyncPayload(1, 2, new int[]{10, 20}, new int[]{30});
+        Object rSelf = r1;
+        assertEquals(r1, rSelf);
+        assertEquals(r1, r2);
+        assertEquals(r1.hashCode(), r2.hashCode());
+        assertTrue(r1.toString().contains("regionX=1"));
+        assertFalse(r1.equals(new LcaWireStreamProtocol.LcaRegionDictSyncPayload(2, 2, new int[]{10, 20}, new int[]{30})));
+
+        LcaWireStreamProtocol.EntryFullChunk f1 =
+                new LcaWireStreamProtocol.EntryFullChunk(1, 2, 3L, 4L, List.of(s1), new byte[]{5});
+        LcaWireStreamProtocol.EntryFullChunk f2 =
+                new LcaWireStreamProtocol.EntryFullChunk(1, 2, 3L, 4L, List.of(s2), new byte[]{5});
+        Object fSelf = f1;
+        assertEquals(f1, fSelf);
+        assertEquals(f1, f2);
+        assertEquals(f1.hashCode(), f2.hashCode());
+        assertTrue(f1.toString().contains("chunkX=1"));
+        assertFalse(f1.equals(new LcaWireStreamProtocol.EntryFullChunk(1, 2, 3L, 4L, List.of(s2), new byte[]{6})));
+
+        LcaWireStreamProtocol.CachedChunkSlab cs1 =
+                new LcaWireStreamProtocol.CachedChunkSlab(OVERWORLD, 1, 2, 3L, 4L, new byte[]{9, 10});
+        LcaWireStreamProtocol.CachedChunkSlab cs2 =
+                new LcaWireStreamProtocol.CachedChunkSlab(OVERWORLD, 1, 2, 3L, 4L, new byte[]{9, 10});
+        Object csSelf = cs1;
+        assertEquals(cs1, csSelf);
+        assertEquals(cs1, cs2);
+        assertEquals(cs1.hashCode(), cs2.hashCode());
+        assertTrue(cs1.toString().contains("chunkX=1"));
+        assertFalse(cs1.equals(new LcaWireStreamProtocol.CachedChunkSlab(OVERWORLD, 1, 2, 3L, 4L, new byte[]{9, 11})));
+
+        LcaSectionBacking[] backings = new LcaSectionBacking[]{new LcaSectionBacking(new byte[0], 1)};
+        LcaWireStreamProtocol.HydratedClientChunkCommit h1 =
+                new LcaWireStreamProtocol.HydratedClientChunkCommit(OVERWORLD, 1, 2, 3L, 4L, backings);
+        LcaWireStreamProtocol.HydratedClientChunkCommit h2 =
+                new LcaWireStreamProtocol.HydratedClientChunkCommit(OVERWORLD, 1, 2, 3L, 4L, backings);
+        Object hSelf = h1;
+        assertEquals(h1, hSelf);
+        assertEquals(h1, h2);
+        assertEquals(h1.hashCode(), h2.hashCode());
+        assertTrue(h1.toString().contains("chunkX=1"));
+        assertFalse(h1.equals(new LcaWireStreamProtocol.HydratedClientChunkCommit(OVERWORLD, 2, 2, 3L, 4L, backings)));
+
+        ConsolidatedMultiTargetFrame c1 = new ConsolidatedMultiTargetFrame(
+                new long[]{1L}, 1, new byte[]{1, 2}, 10, 20, 1, 100L, 50L, 25L);
+        ConsolidatedMultiTargetFrame c2 = new ConsolidatedMultiTargetFrame(
+                new long[]{1L}, 1, new byte[]{1, 2}, 10, 20, 1, 100L, 50L, 25L);
+        Object cSelf = c1;
+        assertEquals(c1, cSelf);
+        assertEquals(c1, c2);
+        assertEquals(c1.hashCode(), c2.hashCode());
+        assertTrue(c1.toString().contains("recipientCount=1"));
+        assertFalse(c1.equals(new ConsolidatedMultiTargetFrame(
+                new long[]{2L}, 1, new byte[]{1, 2}, 10, 20, 1, 100L, 50L, 25L)));
+
+        DecodedMultiTargetFrame dm1 =
+                new DecodedMultiTargetFrame(new long[]{1L}, List.of(), List.of(), new byte[]{3, 4});
+        DecodedMultiTargetFrame dm2 =
+                new DecodedMultiTargetFrame(new long[]{1L}, List.of(), List.of(), new byte[]{3, 4});
+        Object dmSelf = dm1;
+        assertEquals(dm1, dmSelf);
+        assertEquals(dm1, dm2);
+        assertEquals(dm1.hashCode(), dm2.hashCode());
+        assertTrue(dm1.toString().contains("targetBitmapWords"));
+        assertFalse(dm1.equals(new DecodedMultiTargetFrame(new long[]{2L}, List.of(), List.of(), new byte[]{3, 4})));
+    }
 }
