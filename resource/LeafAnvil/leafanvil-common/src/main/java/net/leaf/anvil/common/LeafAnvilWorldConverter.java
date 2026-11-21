@@ -357,8 +357,16 @@ public final class LeafAnvilWorldConverter {
                 try (DirectoryStream<Path> stream = Files.newDirectoryStream(folder)) {
                     for (Path file : stream) {
                         String name = file.getFileName().toString();
-                        if (LCA_REGION_FILE_PATTERN.matcher(name).matches()) {
+                        Matcher lcaMatch = LCA_REGION_FILE_PATTERN.matcher(name);
+                        if (lcaMatch.matches()) {
                             scanned.incrementAndGet();
+                            if (LcaRegionWriter.peekFormatVersion(file) == LcaRegionReader.LCA_FORMAT_VERSION_V2) {
+                                int rx = Integer.parseInt(lcaMatch.group(1));
+                                int rz = Integer.parseInt(lcaMatch.group(2));
+                                workItems.add(() -> upgradeLegacyV2RegionLca(
+                                        folder, file, rx, rz, lcd2Level, keepBackups,
+                                        liveStorage, converted, bytesBefore, bytesAfter));
+                            }
                             continue;
                         }
                         Matcher m = LEGACY_REGION_FILE_PATTERN.matcher(name);
@@ -454,6 +462,46 @@ public final class LeafAnvilWorldConverter {
             Files.deleteIfExists(file);
         }
         converted.incrementAndGet();
+    }
+
+    /**
+     * Off-thread atomic {@code 0x0002 -> 0x0003} upgrade for legacy `.lca` archives
+     * (`anvil-api-ADR-006`, `REQ-RTP-S-004`, `REQ-RTP-S-005`, `@scheduler_dispatch`).
+     */
+    private static void upgradeLegacyV2RegionLca(
+            Path folder,
+            Path lcaFile,
+            int rx,
+            int rz,
+            int lcd2Level,
+            boolean keepBackups,
+            LcaRegionFileStorage liveStorage,
+            AtomicInteger converted,
+            AtomicLong bytesBefore,
+            AtomicLong bytesAfter
+    ) throws IOException {
+        if (liveStorage != null) {
+            liveStorage.closeRegion(rx, rz);
+        }
+        if (!Files.exists(lcaFile)) {
+            return;
+        }
+        if (LcaRegionWriter.peekFormatVersion(lcaFile) != LcaRegionReader.LCA_FORMAT_VERSION_V2) {
+            return;
+        }
+        long before = Files.size(lcaFile);
+        bytesBefore.addAndGet(before);
+        if (keepBackups) {
+            Path bak = folder.resolve(lcaFile.getFileName().toString() + ".v2.bak");
+            Files.copy(lcaFile, bak, StandardCopyOption.REPLACE_EXISTING);
+        }
+        if (LcaRegionWriter.upgradeLegacyArchiveAtomically(lcaFile, lcd2Level)) {
+            if (liveStorage != null) {
+                liveStorage.invalidateRegionCacheState(rx, rz);
+            }
+            bytesAfter.addAndGet(Files.size(lcaFile));
+            converted.incrementAndGet();
+        }
     }
 
     /**
@@ -743,6 +791,15 @@ public final class LeafAnvilWorldConverter {
                     file.getFileName().toString() + "." + Thread.currentThread().getId() + ".heal.tmp");
             LcaRegionWriter.writeBytesAtomicallyDurable(file, tmp, lcaBytes);
             LcaRegionReader.invalidateFileCache(file);
+            if (liveStorage != null && matched) {
+                liveStorage.invalidateRegionCacheState(rx, rz);
+            }
+        }
+        if (LcaRegionWriter.peekFormatVersion(file) == LcaRegionReader.LCA_FORMAT_VERSION_V2
+                && LcaRegionWriter.upgradeLegacyArchiveAtomically(file, -1)) {
+            if (repairs == 0) {
+                modified.incrementAndGet();
+            }
             if (liveStorage != null && matched) {
                 liveStorage.invalidateRegionCacheState(rx, rz);
             }

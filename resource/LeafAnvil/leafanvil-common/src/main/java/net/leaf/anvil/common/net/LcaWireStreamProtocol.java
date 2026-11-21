@@ -1,6 +1,7 @@
 package net.leaf.anvil.common.net;
 
 import io.github.dailystruggle.anvil.LcaSectionBacking;
+import io.github.dailystruggle.anvil.RawChunkFrameSnapshot;
 import io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec;
 
 import java.io.ByteArrayInputStream;
@@ -56,13 +57,15 @@ public final class LcaWireStreamProtocol {
     public static final int CAP_DELTA_REVISIT_CACHE = 1 << 3;
     public static final int CAP_PROXY_SAFE_STORED_ZLIB = 1 << 4;
     public static final int CAP_ORDERLESS_DICT_AND_MULTICAST = 1 << 5;
+    public static final int CAP_LCA_V3_SECTIONS = 1 << 6;
     public static final int ALL_CAPABILITIES =
             CAP_LCA_SECTION_STREAM
                     | CAP_BATCH_LCD2
                     | CAP_CLIENT_HEIGHTMAPS
                     | CAP_DELTA_REVISIT_CACHE
                     | CAP_PROXY_SAFE_STORED_ZLIB
-                    | CAP_ORDERLESS_DICT_AND_MULTICAST;
+                    | CAP_ORDERLESS_DICT_AND_MULTICAST
+                    | CAP_LCA_V3_SECTIONS;
 
     public static final int ENTRY_CLEAN_ACK = 0;
     public static final int ENTRY_PATCH_DELTA = 1;
@@ -166,6 +169,10 @@ public final class LcaWireStreamProtocol {
 
         public boolean isOrderlessDictAndMulticastEnabled() {
             return hasCapability(CAP_ORDERLESS_DICT_AND_MULTICAST);
+        }
+
+        public boolean isV3SectionsEnabled() {
+            return hasCapability(CAP_LCA_V3_SECTIONS);
         }
     }
 
@@ -648,6 +655,7 @@ public final class LcaWireStreamProtocol {
           Objects.requireNonNull(batch, "batch");
           Objects.requireNonNull(session, "session");
           boolean omitHeightmaps = session.isClientHeightmapsEnabled();
+          boolean allowV3Sections = session.isV3SectionsEnabled();
           boolean useOrderlessDict = session.isOrderlessDictAndMulticastEnabled()
                   && dictTableOrNull != null
                   && targetKnownSlotsOrNull != null;
@@ -662,6 +670,7 @@ public final class LcaWireStreamProtocol {
                           out,
                           entry,
                           omitHeightmaps,
+                          allowV3Sections,
                           useOrderlessDict ? dictTableOrNull : null,
                           useOrderlessDict ? targetKnownSlotsOrNull : null
                   );
@@ -670,6 +679,57 @@ public final class LcaWireStreamProtocol {
               throw new UncheckedIOException(e);
           }
           return baos.toByteArray();
+      }
+
+      /**
+       * Returns {@code true} if any chunk entry in {@code batch} contains a {@code 0x0003}-extended
+       * section slice ({@code secExtFlags} {@code 0x01}/{@code 0x02} or Eikonal light residuals).
+       */
+      public static boolean containsV3ExtendedSection(ClientboundLcaChunkBatchPayload batch) {
+          Objects.requireNonNull(batch, "batch");
+          for (BatchChunkEntry entry : batch.entries()) {
+              List<SectionWireSlice> slices = null;
+              if (entry instanceof EntryFullChunk full) {
+                  slices = full.sections();
+              } else if (entry instanceof EntryPatchDelta patch) {
+                  slices = patch.modifiedSections();
+              }
+              if (slices == null) continue;
+              for (SectionWireSlice s : slices) {
+                  if (s != null && !isUniformDirectoryWord(s.directoryWord16())
+                          && RawChunkFrameSnapshot.isV3ExtendedSectionFrame(s.baseFrameSlice())) {
+                      return true;
+                  }
+              }
+          }
+          return false;
+      }
+
+      private static List<SectionWireSlice> adaptSectionsForSession(
+              List<SectionWireSlice> sections,
+              boolean allowV3Sections
+      ) {
+          if (allowV3Sections || sections == null || sections.isEmpty()) {
+              return sections;
+          }
+          List<SectionWireSlice> adapted = null;
+          for (int i = 0; i < sections.size(); i++) {
+              SectionWireSlice s = sections.get(i);
+              if (s != null && !isUniformDirectoryWord(s.directoryWord16())
+                      && RawChunkFrameSnapshot.isV3ExtendedSectionFrame(s.baseFrameSlice())) {
+                  byte[] downgraded = RawChunkFrameSnapshot.downgradeV3BlockSectionFrameToV2(s.baseFrameSlice());
+                  if (RawChunkFrameSnapshot.isV3ExtendedSectionFrame(downgraded)) {
+                      throw new IllegalStateException(
+                              "Cannot stream v3 Eikonal section slice (sectionIndex=" + s.sectionIndex()
+                                      + ") to legacy client without CAP_LCA_V3_SECTIONS");
+                  }
+                  if (adapted == null) {
+                      adapted = new ArrayList<>(sections);
+                  }
+                  adapted.set(i, SectionWireSlice.nonUniform(s.sectionIndex(), downgraded, s.dirtyOverlayEntries()));
+              }
+          }
+          return adapted != null ? adapted : sections;
       }
 
       /**
@@ -794,13 +854,14 @@ public final class LcaWireStreamProtocol {
               BatchChunkEntry entry,
               boolean omitHeightmaps
       ) throws IOException {
-          writeEntryTo(out, entry, omitHeightmaps, null, null);
+          writeEntryTo(out, entry, omitHeightmaps, true, null, null);
       }
 
       private static void writeEntryTo(
               DataOutputStream out,
               BatchChunkEntry entry,
               boolean omitHeightmaps,
+              boolean allowV3Sections,
               LcaOrderlessDictTable dictTableOrNull,
               LcaOrderlessDictTable.KnownSlotBitSet targetKnownSlotsOrNull
       ) throws IOException {
@@ -809,9 +870,11 @@ public final class LcaWireStreamProtocol {
               return;
           }
           if (entry instanceof EntryPatchDelta patch) {
+              List<SectionWireSlice> modSections =
+                      adaptSectionsForSession(patch.modifiedSections(), allowV3Sections);
               boolean useOrderless = dictTableOrNull != null
                       && targetKnownSlotsOrNull != null
-                      && hasNonUniformSectionSlice(patch.modifiedSections());
+                      && hasNonUniformSectionSlice(modSections);
               int flags4 = useOrderless ? (HEADER_FLAG_ORDERLESS_DICT_SECTIONS >>> 10) : 0;
               short headerWord = packEntryHeaderWord16(ENTRY_PATCH_DELTA, flags4, patch.localChunkIndex10());
               out.writeShort(headerWord);
@@ -820,23 +883,25 @@ public final class LcaWireStreamProtocol {
               out.writeInt(patch.dirtySectionBitmask32());
               if (useOrderless) {
                   byte[] dictEncoded = dictTableOrNull.encodeSectionWireSlicesWithDict(
-                          patch.modifiedSections(),
+                          modSections,
                           targetKnownSlotsOrNull
                   );
                   writeVarInt(out, dictEncoded.length);
                   out.write(dictEncoded);
               } else {
-                  for (SectionWireSlice section : patch.modifiedSections()) {
+                  for (SectionWireSlice section : modSections) {
                       writeSectionWireSlice(out, section);
                   }
               }
               return;
           }
           if (entry instanceof EntryFullChunk full) {
+              List<SectionWireSlice> fullSections =
+                      adaptSectionsForSession(full.sections(), allowV3Sections);
               byte[] hmBytes = omitHeightmaps ? new byte[0] : full.heightmapDeltaBytes();
               boolean useOrderless = dictTableOrNull != null
                       && targetKnownSlotsOrNull != null
-                      && hasNonUniformSectionSlice(full.sections());
+                      && hasNonUniformSectionSlice(fullSections);
               int flags4 = (hmBytes.length > 0 ? (HEADER_FLAG_HAS_HEIGHTMAPS >>> 10) : 0)
                       | (useOrderless ? (HEADER_FLAG_ORDERLESS_DICT_SECTIONS >>> 10) : 0);
               short headerWord = packEntryHeaderWord16(ENTRY_FULL_CHUNK, flags4, full.localChunkIndex10());
@@ -847,24 +912,24 @@ public final class LcaWireStreamProtocol {
               out.writeLong(full.secDedSyndrome64());
               if (useOrderless) {
                   byte[] dictEncoded = dictTableOrNull.encodeSectionWireSlicesWithDict(
-                          full.sections(),
+                          fullSections,
                           targetKnownSlotsOrNull
                   );
                   writeVarInt(out, dictEncoded.length);
                   out.write(dictEncoded);
               } else {
-                  out.writeByte(full.sections().size());
+                  out.writeByte(fullSections.size());
                   int overlayMask = 0;
-                  for (int i = 0; i < full.sections().size(); i++) {
-                      SectionWireSlice slice = full.sections().get(i);
+                  for (int i = 0; i < fullSections.size(); i++) {
+                      SectionWireSlice slice = fullSections.get(i);
                       out.writeShort(slice.directoryWord16());
                       if (slice.dirtyOverlayEntries().length > 0) {
                           overlayMask |= (1 << i);
                       }
                   }
                   out.writeInt(overlayMask);
-                  for (int i = 0; i < full.sections().size(); i++) {
-                      SectionWireSlice slice = full.sections().get(i);
+                  for (int i = 0; i < fullSections.size(); i++) {
+                      SectionWireSlice slice = fullSections.get(i);
                       if (!isUniformDirectoryWord(slice.directoryWord16())) {
                           int bodyLen = slice.directoryWord16() & 0x7FFF;
                           out.write(slice.baseFrameSlice(), 0, bodyLen);
