@@ -1,6 +1,27 @@
-# Built-In Testing (`PBIT` / `CBIT`) & 4-Tier Self-Healing Reference (`LeafAnvil`)
+# Built-In Testing (`[LCA bit]` / `PBIT` / `CBIT`) & 4-Tier Self-Healing Reference (`LeafAnvil`)
 
-`LeafAnvil` and `LcaRegionReader` (`api/anvil-api`, `anvil-api-ADR-003` Section 7) enforce Power-On Built-In Testing (`PBIT`), Continuous Built-In Testing (`CBIT T1..T8`), and 4-tier algebraic and structural bit-rot recovery on `.lca` (LeafCraft Anvil) region files.
+`LeafAnvil` (`LeafAnvilBitSuite`, `/leafanvil bit`) and `LcaRegionReader` (`api/anvil-api`, `anvil-api-ADR-003` Section 7) enforce Power-On Built-In Testing (`PBIT`), Continuous Built-In Testing (`CBIT T1..T8`), runtime class/reflection compatibility diagnostics (`LCA-0001`..`LCA-0004`), and 4-tier algebraic and structural bit-rot recovery on `.lca` (LeafCraft Anvil) region files.
+
+Run `/leafanvil bit` (or `/lca bit`) in-game or from the console to execute all 4 registered `[LCA bit]` PBIT and CBIT runtime compatibility checks:
+
+```text
+[LeafAnvil] === [LCA bit] Built-In Test Suite (4/4 PASS, health=HEALTHY) ===
+```
+
+## Namespaces
+
+| Prefix |
+|---|
+| `LCA` |
+
+## `LCA` (`LeafAnvilBitSuite`)
+
+| ID | Code | Severity | Tier | Subsystem | Remediation |
+|---:|---|---|---|---|---|
+| 1 | `LCA_CODEC_WIRE_PBIT` | ERROR | PBIT | codec | Verify `.lca` `v2` (`0x0002`) `LcaSectionBacking` 3D Hilbert / `SEC-DED-64` and `LCD2` (`0x4C44`) wire batch round-trip integrity (`LcaWireStreamProtocol`). |
+| 2 | `LCA_DISK_STORAGE_COMPAT` | ERROR | CBIT | storage | Verify NMS `RegionFileStorage` / `RegionFile` class compatibility (`NmsRegionStorageInterceptor`) and confirm `/leafanvil status` reports `interceptedStorages >= 3` per enabled dimension (`region/`, `entities/`, `poi/`). |
+| 3 | `LCA_SECTION_BRIDGE_COMPAT` | ERROR | CBIT | section | Verify NMS `Block.getId`, `LevelChunkSection`, and `PalettedContainer` state extraction compatibility (`LcaSectionBridge`) for the running Minecraft server version. |
+| 4 | `LCA_NETWORK_CARRIER_COMPAT` | ERROR | CBIT | carrier | Verify platform carrier networking, `ServerAccessor`, and `CommandsAPI` command bindings for the active loader (`Paper`, `Folia`, `Spigot`, `Fabric`, or `NeoForge`). |
 
 ---
 

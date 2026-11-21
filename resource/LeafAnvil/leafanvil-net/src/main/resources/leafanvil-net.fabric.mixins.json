@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "net.leaf.anvil.fabric.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "MixinPlayerChunkSender",
+    "MixinCompressionEncoder",
+    "MixinLevelChunkSection",
+    "MixinPalettedContainer"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

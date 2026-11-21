@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-05 (Updated 2026-11-07)
 - **Scope:** `:resource:LeafAnvil` (`leafanvil-common`, `leafanvil-paper`, `leafanvil-fabric`, `leafanvil-neoforge`, `leafanvil-net`) & `:anvil-api` (`io.github.dailystruggle.anvil`)
-- **Related ADRs & Specs:** [`leafanvil-ADR-001`](leafanvil-ADR-001-Multi-Loader-lca-world-storage-and-bytecode-interceptor.md), [`leafanvil-ADR-002`](leafanvil-ADR-002-in-memory-lca-chunk-representation-and-dirty-overlay-compaction.md), [`leafshard-ADR-001`](../../../LeafShard/docs/adr/leafshard-ADR-001-hybrid-32x32-lca-region-leases-and-split-brain-fencing.md), [`leafshard-ADR-002`](../../../LeafShard/docs/adr/leafshard-ADR-002-peer-netty-lcas-halo-mesh-and-border-hysteresis-handoff.md), [`anvil-api-ADR-002`](../../../../api/anvil-api/docs/adr/anvil-api-ADR-002-multi-format-region-support.md), [`anvil-api-ADR-003`](../../../../api/anvil-api/docs/adr/anvil-api-ADR-003-hilbert-roaring-gray-chunk-archive.md), [`leafrtp-ADR-072`](../../../LeafRTP/docs/adr/leafrtp-ADR-072-zero-reallocation-flat-bitpacked-chunk-sections.md), [`LCA-ICD-1.0` (`api/anvil-api/docs/ICD.md`)](../../../../api/anvil-api/docs/ICD.md)
+- **Related ADRs & Specs:** [`leafanvil-ADR-001`](leafanvil-ADR-001-Multi-Loader-lca-world-storage-and-bytecode-interceptor.md), [`leafanvil-ADR-002`](leafanvil-ADR-002-in-memory-lca-chunk-representation-and-dirty-overlay-compaction.md), [`leafanvil-ADR-005`](leafanvil-ADR-005-dual-mode-javaagent-direct-section-bridge-and-netty-wire-pipeline.md), [`leafshard-ADR-001`](../../../LeafShard/docs/adr/leafshard-ADR-001-hybrid-32x32-lca-region-leases-and-split-brain-fencing.md), [`leafshard-ADR-002`](../../../LeafShard/docs/adr/leafshard-ADR-002-peer-netty-lcas-halo-mesh-and-border-hysteresis-handoff.md), [`anvil-api-ADR-002`](../../../../api/anvil-api/docs/adr/anvil-api-ADR-002-multi-format-region-support.md), [`anvil-api-ADR-003`](../../../../api/anvil-api/docs/adr/anvil-api-ADR-003-hilbert-roaring-gray-chunk-archive.md), [`leafrtp-ADR-072`](../../../LeafRTP/docs/adr/leafrtp-ADR-072-zero-reallocation-flat-bitpacked-chunk-sections.md), [`LCA-ICD-1.0` (`api/anvil-api/docs/ICD.md`)](../../../../api/anvil-api/docs/ICD.md)
 
 ---
 
@@ -58,7 +58,7 @@ LeafAnvil Negotiated .lca Stream Path (Fabric / NeoForge client with LeafAnvil):
    - During connection setup, a `LeafAnvil`-equipped client sends `LcaChunkStreamHandshakePayload(int protocolVersion, int capabilityFlags, int clientCacheBudgetKiB)`.
    - `capabilityFlags` negotiates:
      - `CAP_LCA_SECTION_STREAM (1 << 0)` — `.lca` `SectionFrame` + Gray-code light bitplane wire encoding;
-     - `CAP_BATCH_ZSTD (1 << 1)` — chunk-batch pure-Java `LCD2` (`0x4C44`) intra-batch compression (`LcaWireStreamProtocol`);
+     - `CAP_BATCH_LCD2 (1 << 1)` — chunk-batch pure-Java `LCD2` (`0x4C44`) intra-batch compression (`LcaWireStreamProtocol`);
      - `CAP_CLIENT_HEIGHTMAPS (1 << 2)` — client-side `Heightmap.primeHeightmaps` reconstruction (`0 B` heightmap wire cost);
      - `CAP_DELTA_REVISIT_CACHE (1 << 3)` — `lastUpdateTick` + SEC-DED syndrome revisit delta patching.
 3. **Mixed-Client Fallback Invariant:**
@@ -139,6 +139,25 @@ While `leafanvil-ADR-002` did not reduce overall server JVM heap in practice (be
    - In a distributed world partitioned along `32x32`-chunk (`.lca` region, `512x512`-block) boundaries, neighboring shards must replicate a `10-chunk` (`160-block`) read-only Halo ring across region seams so players see live block edits and terrain across server borders.
    - Traditional Mojang NBT / `ClientboundLevelChunkWithLightPacket` serialization (`~45–85 KiB` raw / `~6–14 KiB` `Zlib` per chunk on the tick thread) would saturate inter-server links and main-thread CPU whenever blocks change near a border.
    - By wrapping `LeafAnvil`'s `LCAS` (`0x4C434153`) delta payloads inside `LeafShard`'s peer Netty `LSHD` (`0x4C534844`) `FRAME_LCAS_CHUNK_DELTA (0x01)` and `FRAME_CHUNK_REFILL_REQ (0x02)` frames, `LeafShardCoordinator` synchronizes cross-border Halo chunks off-thread in sub-kilobyte packets with strict `SEC-DED-64` syndrome verification.
+
+---
+
+### 7. `500 kbps` (`350 kbps` Usable) Ultralight Upload Profile (`CAP_ORDERLESS_DICT_AND_MULTICAST = 1 << 5`)
+
+For residential or upload-constrained hosts with a nominal `500 kbps` uplink (`~333–375 kbps` / `~2,187 bytes/tick` practical goodput at `20 TPS`), `LeafAnvil` and `LeafAnvil-Net` provide three portable, reflection-free components in `net.leaf.anvil.common.net` (structured with flat records and fixed-size primitive arrays for 1:1 Rust `lca-format` and cross-language auto-translation):
+
+1. **Packet & Layer-3/Layer-4 Framing Differential Profiler (`LcaPacketDifferentialProfiler`):**
+   - Tracks logical packet counts, uncompressed Layer-7 bytes, compressed Layer-7 bytes, physical TCP flush segment counts, and `52 B` per-segment TCP/IPv4 framing tax across 6 fixed buckets (`CHUNK_STREAM`, `ENTITY_KINEMATICS`, `ENTITY_METADATA_NBT`, `WORLD_BLOCK_DELTA`, `TRANSIENT_FX_UI`, `TCP_FRAMING_TAX`).
+   - Deducts current-tick non-chunk payloads and TCP headers from the global usable upload cap (`max-server-upload-kbps: 350`) before allocating remaining tick bytes to chunk streaming.
+2. **Shared Atomically-Updated Orderless Dictionary Table (`LcaOrderlessDictTable`, Magic `0x4F444354` / `"ODCT"`):**
+   - Maintains a `4,096`-slot, 2-way associative content-addressed dictionary (`slotId12` + `tag8`/`tag4` verification hash) paired with a `512-byte` (`long[64]`) per-session `KnownSlotBitSet`.
+   - Concurrent region workers atomically promote recurring chunk `SectionWireSlice` motifs, entity metadata archetypes, and registry/component strings via CAS without shifting slot indices or causing sequential epoch head-of-line blocking.
+   - When `CAP_ORDERLESS_DICT_AND_MULTICAST` (`0x20`) is negotiated, `LcaWireStreamProtocol` sets `HEADER_FLAG_ORDERLESS_DICT_SECTIONS` (`1 << 11`) on `EntryFullChunk` and `EntryPatchDelta` entries whose non-uniform `SectionWireSlice`s are encoded via `LcaOrderlessDictTable#encodeSectionWireSlicesWithDict`, physically replacing repeated section frames on the socket with `2-byte` `refWord16` (`(slotId12 << 4) | tag4`) references (`REQ-NET-ODCT-001`) and expanding them inside `LcaClientWireReceiver` / `LcaInMemoryChunkCoordinator#receiveClientChunkBatchOrdered` prior to `SEC-DED-64` syndrome verification (`REQ-NET-ODCT-002`, `REQ-RTP-S-004`).
+3. **Multi-Target Spatial Group Consolidation, `1,000+` Player Addressing & Edge Relay Fan-Out (`LcaMultiTargetConsolidator`, Magic `0x4D544346` / `"MTCF"`):**
+   - Computes `commonKnownSlots` (`bitwise AND` across target players' `KnownSlotBitSet`s in a shared spatial cell), encodes recurring slices once, updates all recipients' bitsets in a single tick, and packs moving entity updates into quantized `4–6 B` `KinematicDeltaRow` entries flushed once per tick (`coalesce-tick-flushes: true`).
+   - `ConsolidatedMultiTargetFrame` (`MTCF`) encodes an immutable, defensively cloned variable-length `long[] targetBitmapWords` (`1..64` words = up to `4,096` concurrent player slots, `REQ-NET-MTCF-001`) and includes `LcaMultiTargetConsolidator.MultiTargetTcpFanOutRelay` (standalone TCP `1-to-M` relay shipped in both `LeafAnvil` and MIT `LeafAnvil-Net`) alongside `LeafShardPeerFrameCodec.FRAME_CLIENT_MULTICAST_FANOUT` (`0x0C`) in `VelocityLeafShardPlugin` (`REQ-SHARD-FANOUT-001`).
+   - Verified across two physical machines (`scripts/bench_leafanvil_1000socket_bamboo.py`, `REQ-BENCH-1000-001`) with the Origin Server on the local machine (`350 kbps` usable cap, streaming `60` upstream `MTCF` frames = `192.95 kbps` Layer-7 / `218.74 kbps` Layer-3/Layer-4 across $R = 3$ relay streams) and $R = 3$ `MultiTargetTcpFanOutRelay` instances + `1,000` live concurrent TCP client sockets on the `bamboo` Threadripper (`20,000 / 20,000` client frames delivered, `480,000` `.lca` sections hydrated and `SEC-DED-64`-verified, `720,000` entity kinematic rows decoded, `0` errors).
+   - Orders candidate chunks by Chebyshev spiral distance rings (`Ring 0` `r <= 2` immediate `25` chunks first $\to$ `Ring 1` `r = 3..6` $\to$ `Ring 2` `r >= 7`) in `LcaInMemoryChunkCoordinator#packLowBandwidth500kOutboundBatchesForPlayer`.
 
 ---
 

@@ -1,0 +1,32 @@
+plugins {
+    id 'java'
+}
+
+group = 'net.leaf'
+version = '0.3.0'
+
+dependencies {
+    api project(':resource:LeafAnvil:leafanvil-common')
+    implementation(project(':bukkit:bukkit-common')) { transitive = false }
+    implementation(project(':paper:paper-common')) { transitive = false }
+    compileOnly 'io.papermc.paper:paper-api:1.21.4-R0.1-SNAPSHOT'
+    compileOnly 'io.netty:netty-transport:4.1.115.Final'
+    compileOnly 'io.netty:netty-buffer:4.1.115.Final'
+    compileOnly 'io.netty:netty-common:4.1.115.Final'
+    implementation project(':commands-api')
+
+    testImplementation 'io.papermc.paper:paper-api:1.21.4-R0.1-SNAPSHOT'
+    testImplementation 'io.netty:netty-transport:4.1.115.Final'
+    testImplementation 'io.netty:netty-buffer:4.1.115.Final'
+    testImplementation 'io.netty:netty-common:4.1.115.Final'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+jar {
+    archiveClassifier.set('dev')
+}
+
+test {
+    useJUnitPlatform()
+}

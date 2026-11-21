@@ -1,0 +1,21 @@
+// LeafAnvil - container (aggregator) project only.
+//
+// The installable multi-loader artifact is produced by
+// `:resource:LeafAnvil:leafanvil-plugin` as `LeafAnvil-<version>.jar`.
+group = 'net.leaf'
+version = '0.3.0'
+
+jar.enabled = false
+
+tasks.named('build') {
+    dependsOn ':resource:LeafAnvil:leafanvil-common:build'
+    dependsOn ':resource:LeafAnvil:leafanvil-paper:build'
+    dependsOn ':resource:LeafAnvil:leafanvil-plugin:build'
+    dependsOn ':resource:LeafAnvil:leafanvil-net:build'
+    if (findProject(':resource:LeafAnvil:leafanvil-fabric') != null) {
+        dependsOn ':resource:LeafAnvil:leafanvil-fabric:build'
+    }
+    if (findProject(':resource:LeafAnvil:leafanvil-neoforge') != null) {
+        dependsOn ':resource:LeafAnvil:leafanvil-neoforge:build'
+    }
+}

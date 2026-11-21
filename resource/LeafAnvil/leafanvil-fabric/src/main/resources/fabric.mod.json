@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "leafanvil",
+  "version": "0.3.0",
+  "name": "LeafAnvil",
+  "description": "Zero-fork .lca (LeafCraft Anvil) world save format mod & converter.",
+  "authors": ["leaf"],
+  "license": "PolyForm-Noncommercial-1.0.0 OR LicenseRef-LeafCraft-Commercial",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "net.leaf.anvil.fabric.client.FabricLeafAnvilClientMod",
+      "net.leaf.anvil.fabric.FabricLeafAnvilMod"
+    ],
+    "client": [
+      "net.leaf.anvil.fabric.client.FabricLeafAnvilClientMod"
+    ]
+  },
+  "mixins": [
+    "leafanvil.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.18.4",
+    "fabric-api": "*",
+    "minecraft": ">=26.1"
+  }
+}

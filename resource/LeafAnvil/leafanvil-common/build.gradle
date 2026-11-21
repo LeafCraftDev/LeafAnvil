@@ -1,0 +1,53 @@
+plugins {
+    id 'java-library'
+}
+
+group = 'net.leaf'
+version = '0.3.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+dependencies {
+    api project(':anvil-api')
+    api project(':server-api')
+    api project(':yaml-api')
+    api project(':units-api')
+    api project(':bit-api')
+    api project(':commands-api')
+    api project(':menu-api')
+    api project(':effects-api')
+    api project(':predict-api')
+
+    testImplementation rootProject.libs.jqwik
+}
+
+test {
+    useJUnitPlatform {
+        includeEngines 'junit-jupiter', 'jqwik'
+    }
+}
+
+processResources {
+    from("${rootProject.projectDir}/api/anvil-api/docs") {
+        include 'ICD.md'
+        into 'docs'
+    }
+    from("${rootProject.projectDir}/resource/LeafAnvil/docs") {
+        include 'admin/**'
+        include 'dev/**'
+        exclude '**/*.bak'
+        into 'docs'
+    }
+    from("${rootProject.projectDir}/resource/LeafAnvil") {
+        include 'README.md'
+        include 'LICENSE'
+        into 'META-INF/leafanvil'
+    }
+    from("${rootProject.projectDir}/api/anvil-api/docs") {
+        include 'ICD.md'
+        into 'META-INF/leafanvil'
+    }
+}
