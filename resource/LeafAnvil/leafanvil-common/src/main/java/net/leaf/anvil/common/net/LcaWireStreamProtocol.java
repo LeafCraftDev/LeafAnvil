@@ -243,6 +243,39 @@ public final class LcaWireStreamProtocol {
                 throw new UncheckedIOException(e);
             }
         }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof LcaRegionDictSyncPayload other)) {
+                return false;
+            }
+            return this.regionX == other.regionX
+                    && this.regionZ == other.regionZ
+                    && java.util.Arrays.equals(this.dictIdToBlockStateRegistryId, other.dictIdToBlockStateRegistryId)
+                    && java.util.Arrays.equals(this.dictIdToBiomeRegistryId, other.dictIdToBiomeRegistryId);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + this.regionX;
+            result = 31 * result + this.regionZ;
+            result = 31 * result + java.util.Arrays.hashCode(this.dictIdToBlockStateRegistryId);
+            result = 31 * result + java.util.Arrays.hashCode(this.dictIdToBiomeRegistryId);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "LcaRegionDictSyncPayload[regionX=" + this.regionX
+                    + ", regionZ=" + this.regionZ
+                    + ", dictIdToBlockStateRegistryId=" + java.util.Arrays.toString(this.dictIdToBlockStateRegistryId)
+                    + ", dictIdToBiomeRegistryId=" + java.util.Arrays.toString(this.dictIdToBiomeRegistryId)
+                    + "]";
+        }
     }
 
     // =========================================================================
@@ -360,6 +393,39 @@ public final class LcaWireStreamProtocol {
             return isUniformDirectoryWord(directoryWord16)
                     && baseFrameSlice.length == 0
                     && dirtyOverlayEntries.length == 0;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof SectionWireSlice other)) {
+                return false;
+            }
+            return this.sectionIndex == other.sectionIndex
+                    && this.directoryWord16 == other.directoryWord16
+                    && java.util.Arrays.equals(this.baseFrameSlice, other.baseFrameSlice)
+                    && java.util.Arrays.equals(this.dirtyOverlayEntries, other.dirtyOverlayEntries);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + this.sectionIndex;
+            result = 31 * result + this.directoryWord16;
+            result = 31 * result + java.util.Arrays.hashCode(this.baseFrameSlice);
+            result = 31 * result + java.util.Arrays.hashCode(this.dirtyOverlayEntries);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "SectionWireSlice[sectionIndex=" + this.sectionIndex
+                    + ", directoryWord16=" + this.directoryWord16
+                    + ", baseFrameSlice=" + java.util.Arrays.toString(this.baseFrameSlice)
+                    + ", dirtyOverlayEntries=" + java.util.Arrays.toString(this.dirtyOverlayEntries)
+                    + "]";
         }
     }
 
@@ -494,6 +560,45 @@ public final class LcaWireStreamProtocol {
 
         public byte[] toCanonicalSlabBytes() {
             return serializeCanonicalChunkSlab(chunkX, chunkZ, sections, heightmapDeltaBytes);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof EntryFullChunk other)) {
+                return false;
+            }
+            return this.chunkX == other.chunkX
+                    && this.chunkZ == other.chunkZ
+                    && this.lastUpdateTick == other.lastUpdateTick
+                    && this.secDedSyndrome64 == other.secDedSyndrome64
+                    && java.util.Objects.equals(this.sections, other.sections)
+                    && java.util.Arrays.equals(this.heightmapDeltaBytes, other.heightmapDeltaBytes);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + this.chunkX;
+            result = 31 * result + this.chunkZ;
+            result = 31 * result + Long.hashCode(this.lastUpdateTick);
+            result = 31 * result + Long.hashCode(this.secDedSyndrome64);
+            result = 31 * result + java.util.Objects.hashCode(this.sections);
+            result = 31 * result + java.util.Arrays.hashCode(this.heightmapDeltaBytes);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "EntryFullChunk[chunkX=" + this.chunkX
+                    + ", chunkZ=" + this.chunkZ
+                    + ", lastUpdateTick=" + this.lastUpdateTick
+                    + ", secDedSyndrome64=" + this.secDedSyndrome64
+                    + ", sections=" + this.sections
+                    + ", heightmapDeltaBytes=" + java.util.Arrays.toString(this.heightmapDeltaBytes)
+                    + "]";
         }
     }
 
@@ -1127,6 +1232,45 @@ public final class LcaWireStreamProtocol {
         public int byteSize() {
             return slabBytes.length;
         }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof CachedChunkSlab other)) {
+                return false;
+            }
+            return java.util.Objects.equals(this.dimension, other.dimension)
+                    && this.chunkX == other.chunkX
+                    && this.chunkZ == other.chunkZ
+                    && this.lastUpdateTick == other.lastUpdateTick
+                    && this.secDedSyndrome64 == other.secDedSyndrome64
+                    && java.util.Arrays.equals(this.slabBytes, other.slabBytes);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + java.util.Objects.hashCode(this.dimension);
+            result = 31 * result + this.chunkX;
+            result = 31 * result + this.chunkZ;
+            result = 31 * result + Long.hashCode(this.lastUpdateTick);
+            result = 31 * result + Long.hashCode(this.secDedSyndrome64);
+            result = 31 * result + java.util.Arrays.hashCode(this.slabBytes);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "CachedChunkSlab[dimension=" + this.dimension
+                    + ", chunkX=" + this.chunkX
+                    + ", chunkZ=" + this.chunkZ
+                    + ", lastUpdateTick=" + this.lastUpdateTick
+                    + ", secDedSyndrome64=" + this.secDedSyndrome64
+                    + ", slabBytes=" + java.util.Arrays.toString(this.slabBytes)
+                    + "]";
+        }
     }
 
     /**
@@ -1493,6 +1637,44 @@ public final class LcaWireStreamProtocol {
             long secDedSyndrome64,
             LcaSectionBacking[] sectionBackings
     ) {
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof HydratedClientChunkCommit other)) {
+                return false;
+            }
+            return java.util.Objects.equals(this.dimension, other.dimension)
+                    && this.chunkX == other.chunkX
+                    && this.chunkZ == other.chunkZ
+                    && this.lastUpdateTick == other.lastUpdateTick
+                    && this.secDedSyndrome64 == other.secDedSyndrome64
+                    && java.util.Arrays.equals(this.sectionBackings, other.sectionBackings);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + java.util.Objects.hashCode(this.dimension);
+            result = 31 * result + this.chunkX;
+            result = 31 * result + this.chunkZ;
+            result = 31 * result + Long.hashCode(this.lastUpdateTick);
+            result = 31 * result + Long.hashCode(this.secDedSyndrome64);
+            result = 31 * result + java.util.Arrays.hashCode(this.sectionBackings);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "HydratedClientChunkCommit[dimension=" + this.dimension
+                    + ", chunkX=" + this.chunkX
+                    + ", chunkZ=" + this.chunkZ
+                    + ", lastUpdateTick=" + this.lastUpdateTick
+                    + ", secDedSyndrome64=" + this.secDedSyndrome64
+                    + ", sectionBackings=" + java.util.Arrays.toString(this.sectionBackings)
+                    + "]";
+        }
     }
 
     /**

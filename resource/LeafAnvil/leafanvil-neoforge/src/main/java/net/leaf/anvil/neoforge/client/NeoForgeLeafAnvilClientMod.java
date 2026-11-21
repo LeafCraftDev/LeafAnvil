@@ -68,6 +68,32 @@ public final class NeoForgeLeafAnvilClientMod {
             CustomPacketPayload.Type<LcaRawCustomPayload> type,
             byte[] data
     ) implements CustomPacketPayload {
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof LcaRawCustomPayload other)) {
+                return false;
+            }
+            return java.util.Objects.equals(this.type, other.type)
+                    && java.util.Arrays.equals(this.data, other.data);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + java.util.Objects.hashCode(this.type);
+            result = 31 * result + java.util.Arrays.hashCode(this.data);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "LcaRawCustomPayload[type=" + this.type
+                    + ", data=" + java.util.Arrays.toString(this.data)
+                    + "]";
+        }
     }
 
     private static volatile CustomPacketPayload.Type<LcaRawCustomPayload> handshakePayloadType;

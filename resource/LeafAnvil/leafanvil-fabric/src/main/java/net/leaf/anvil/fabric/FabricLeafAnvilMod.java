@@ -433,11 +433,8 @@ public final class FabricLeafAnvilMod implements ModInitializer {
             Method invokerMethod = event.getClass().getMethod("invoker");
             invokerMethod.setAccessible(true);
             Object invoker = invokerMethod.invoke(event);
-            Class<?> listenerInterface = null;
-            for (Class<?> iface : invoker.getClass().getInterfaces()) {
-                listenerInterface = iface;
-                break;
-            }
+            Class<?>[] ifaces = invoker.getClass().getInterfaces();
+            Class<?> listenerInterface = ifaces.length > 0 ? ifaces[0] : null;
             if (listenerInterface == null) {
                 return;
             }
@@ -483,6 +480,32 @@ public final class FabricLeafAnvilMod implements ModInitializer {
             CustomPacketPayload.Type<LcaRawCustomPayload> type,
             byte[] data
     ) implements CustomPacketPayload {
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof LcaRawCustomPayload other)) {
+                return false;
+            }
+            return java.util.Objects.equals(this.type, other.type)
+                    && java.util.Arrays.equals(this.data, other.data);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + java.util.Objects.hashCode(this.type);
+            result = 31 * result + java.util.Arrays.hashCode(this.data);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "LcaRawCustomPayload[type=" + this.type
+                    + ", data=" + java.util.Arrays.toString(this.data)
+                    + "]";
+        }
     }
 
     private static volatile CustomPacketPayload.Type<LcaRawCustomPayload> handshakePayloadType;
@@ -853,11 +876,8 @@ public final class FabricLeafAnvilMod implements ModInitializer {
             Method invokerMethod = event.getClass().getMethod("invoker");
             invokerMethod.setAccessible(true);
             Object invoker = invokerMethod.invoke(event);
-            Class<?> listenerInterface = null;
-            for (Class<?> iface : invoker.getClass().getInterfaces()) {
-                listenerInterface = iface;
-                break;
-            }
+            Class<?>[] ifaces = invoker.getClass().getInterfaces();
+            Class<?> listenerInterface = ifaces.length > 0 ? ifaces[0] : null;
             if (listenerInterface == null) {
                 return;
             }
@@ -1809,11 +1829,8 @@ public final class FabricLeafAnvilMod implements ModInitializer {
                 Method invokerMethod = event.getClass().getMethod("invoker");
                 invokerMethod.setAccessible(true);
                 Object invoker = invokerMethod.invoke(event);
-                Class<?> listenerInterface = null;
-                for (Class<?> iface : invoker.getClass().getInterfaces()) {
-                    listenerInterface = iface;
-                    break;
-                }
+                Class<?>[] ifaces = invoker.getClass().getInterfaces();
+                Class<?> listenerInterface = ifaces.length > 0 ? ifaces[0] : null;
                 if (listenerInterface == null) continue;
                 Object proxy = Proxy.newProxyInstance(
                         listenerInterface.getClassLoader(),

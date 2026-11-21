@@ -639,6 +639,39 @@ public final class LcaOrderlessDictTable {
         public byte[] patternBytes() {
             return patternBytes.clone();
         }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof DictSlotEntry other)) {
+                return false;
+            }
+            return this.slotId12 == other.slotId12
+                    && this.tag8 == other.tag8
+                    && this.kind == other.kind
+                    && java.util.Arrays.equals(this.patternBytes, other.patternBytes);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + this.slotId12;
+            result = 31 * result + this.tag8;
+            result = 31 * result + this.kind;
+            result = 31 * result + java.util.Arrays.hashCode(this.patternBytes);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "DictSlotEntry[slotId12=" + this.slotId12
+                    + ", tag8=" + this.tag8
+                    + ", kind=" + this.kind
+                    + ", patternBytes=" + java.util.Arrays.toString(this.patternBytes)
+                    + "]";
+        }
     }
 
     /**
@@ -659,6 +692,39 @@ public final class LcaOrderlessDictTable {
         @Override
         public byte[] patternBytes() {
             return patternBytes.clone();
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof DictLearnEntry other)) {
+                return false;
+            }
+            return this.slotId12 == other.slotId12
+                    && this.tag8 == other.tag8
+                    && this.kind == other.kind
+                    && java.util.Arrays.equals(this.patternBytes, other.patternBytes);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + this.slotId12;
+            result = 31 * result + this.tag8;
+            result = 31 * result + this.kind;
+            result = 31 * result + java.util.Arrays.hashCode(this.patternBytes);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "DictLearnEntry[slotId12=" + this.slotId12
+                    + ", tag8=" + this.tag8
+                    + ", kind=" + this.kind
+                    + ", patternBytes=" + java.util.Arrays.toString(this.patternBytes)
+                    + "]";
         }
     }
 
@@ -682,6 +748,45 @@ public final class LcaOrderlessDictTable {
         @Override
         public byte[] wireBytes() {
             return wireBytes.clone();
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof OrderlessEncodedBatch other)) {
+                return false;
+            }
+            return java.util.Arrays.equals(this.wireBytes, other.wireBytes)
+                    && this.originalRawBytes == other.originalRawBytes
+                    && this.inlineLearnEntryCount == other.inlineLearnEntryCount
+                    && this.slotReferenceHitCount == other.slotReferenceHitCount
+                    && this.rawLiteralCount == other.rawLiteralCount
+                    && java.util.Objects.equals(this.newlyLearnedSlots, other.newlyLearnedSlots);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + java.util.Arrays.hashCode(this.wireBytes);
+            result = 31 * result + this.originalRawBytes;
+            result = 31 * result + this.inlineLearnEntryCount;
+            result = 31 * result + this.slotReferenceHitCount;
+            result = 31 * result + this.rawLiteralCount;
+            result = 31 * result + java.util.Objects.hashCode(this.newlyLearnedSlots);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "OrderlessEncodedBatch[wireBytes=" + java.util.Arrays.toString(this.wireBytes)
+                    + ", originalRawBytes=" + this.originalRawBytes
+                    + ", inlineLearnEntryCount=" + this.inlineLearnEntryCount
+                    + ", slotReferenceHitCount=" + this.slotReferenceHitCount
+                    + ", rawLiteralCount=" + this.rawLiteralCount
+                    + ", newlyLearnedSlots=" + this.newlyLearnedSlots
+                    + "]";
         }
     }
 

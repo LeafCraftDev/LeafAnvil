@@ -167,6 +167,7 @@ public final class NmsRegionStorageInterceptor {
         private final Object uncompressedVersion;
         private final boolean wrapInOptional;
         private final Map<Long, Object> bridgesByKey = new ConcurrentHashMap<>();
+        private final Object cacheWriteLock = new Object();
 
         CacheController(
                 LcaRegionFileStorage storage,
@@ -218,7 +219,7 @@ public final class NmsRegionStorageInterceptor {
             });
             if (created[0] && putMethod != null && cacheInstance != null) {
                 try {
-                    synchronized (cacheInstance) {
+                    synchronized (cacheWriteLock) {
                         putMethod.invoke(cacheInstance, packedRegionKey, bridge);
                     }
                 } catch (ReflectiveOperationException e) {
@@ -815,10 +816,12 @@ public final class NmsRegionStorageInterceptor {
         }
     }
 
+    private static final Object REGION_CACHE_DRAIN_LOCK = new Object();
+
     private static void closeExistingCachedRegionFiles(Object currentCache) {
         try {
             List<?> snapshot;
-            synchronized (currentCache) {
+            synchronized (REGION_CACHE_DRAIN_LOCK) {
                 Method valuesMethod = currentCache.getClass().getMethod("values");
                 Object valuesObj = valuesMethod.invoke(currentCache);
                 snapshot = valuesObj instanceof Collection<?> col
@@ -1239,6 +1242,38 @@ public final class NmsRegionStorageInterceptor {
         }
 
         private record MethodRec(int access, int nameIdx, int descIdx, byte[] codeAttr) {
+            @Override
+            public boolean equals(Object o) {
+                if (this == o) {
+                    return true;
+                }
+                if (!(o instanceof MethodRec other)) {
+                    return false;
+                }
+                return this.access == other.access
+                        && this.nameIdx == other.nameIdx
+                        && this.descIdx == other.descIdx
+                        && java.util.Arrays.equals(this.codeAttr, other.codeAttr);
+            }
+
+            @Override
+            public int hashCode() {
+                int result = 1;
+                result = 31 * result + this.access;
+                result = 31 * result + this.nameIdx;
+                result = 31 * result + this.descIdx;
+                result = 31 * result + java.util.Arrays.hashCode(this.codeAttr);
+                return result;
+            }
+
+            @Override
+            public String toString() {
+                return "MethodRec[access=" + this.access
+                        + ", nameIdx=" + this.nameIdx
+                        + ", descIdx=" + this.descIdx
+                        + ", codeAttr=" + java.util.Arrays.toString(this.codeAttr)
+                        + "]";
+            }
         }
 
         ClassFileBuilder(String thisInternal, String superInternal) {

@@ -1,10 +1,13 @@
 package net.leaf.anvil.agent;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.instrument.Instrumentation;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
@@ -55,7 +58,7 @@ public final class LeafAnvilPremain {
         Path bridgeJar = null;
         try {
             ClassLoader cl = LeafAnvilPremain.class.getClassLoader();
-            bridgeJar = Files.createTempFile("leafanvil-agent-bridge-", ".jar");
+            bridgeJar = createOwnerOnlyTempBridgeJar();
             bridgeJar.toFile().deleteOnExit();
             try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(bridgeJar))) {
                 for (String entryName : BOOTSTRAP_BRIDGE_ENTRIES) {
@@ -86,6 +89,28 @@ public final class LeafAnvilPremain {
                     t
             );
         }
+    }
+
+    private static Path createOwnerOnlyTempBridgeJar() throws IOException {
+        if (FileSystems.getDefault().supportedFileAttributeViews().contains("posix")) {
+            return Files.createTempFile(
+                    "leafanvil-agent-bridge-",
+                    ".jar",
+                    PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))
+            );
+        }
+        Path privateDir = Path.of(System.getProperty("user.dir", ".")).resolve(".leafanvil-agent");
+        Files.createDirectories(privateDir);
+        Path tempFile = Files.createTempFile(privateDir, "leafanvil-agent-bridge-", ".jar");
+        File f = tempFile.toFile();
+        if (!f.setReadable(false, false) || !f.setReadable(true, true)
+                || !f.setWritable(false, false) || !f.setWritable(true, true)) {
+            LOGGER.log(
+                    System.Logger.Level.WARNING,
+                    "[LeafAnvil Agent] Could not restrict permissions on temporary bridge jar: " + tempFile
+            );
+        }
+        return tempFile;
     }
 
     private static void markBootstrapAgentActive() {

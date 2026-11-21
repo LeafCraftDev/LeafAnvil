@@ -102,7 +102,43 @@ public final class PaperLcaNettyChannelHandler extends ChannelDuplexHandler {
             int sectionZ,
             short[] packedLocalPositions12,
             int[] runtimeStateIds
-    ) implements OutboundVoxelDescriptor {}
+    ) implements OutboundVoxelDescriptor {
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof SectionMultiBlockUpdateDescriptor other)) {
+                return false;
+            }
+            return this.sectionX == other.sectionX
+                    && this.sectionY == other.sectionY
+                    && this.sectionZ == other.sectionZ
+                    && java.util.Arrays.equals(this.packedLocalPositions12, other.packedLocalPositions12)
+                    && java.util.Arrays.equals(this.runtimeStateIds, other.runtimeStateIds);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + this.sectionX;
+            result = 31 * result + this.sectionY;
+            result = 31 * result + this.sectionZ;
+            result = 31 * result + java.util.Arrays.hashCode(this.packedLocalPositions12);
+            result = 31 * result + java.util.Arrays.hashCode(this.runtimeStateIds);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "SectionMultiBlockUpdateDescriptor[sectionX=" + this.sectionX
+                    + ", sectionY=" + this.sectionY
+                    + ", sectionZ=" + this.sectionZ
+                    + ", packedLocalPositions12=" + java.util.Arrays.toString(this.packedLocalPositions12)
+                    + ", runtimeStateIds=" + java.util.Arrays.toString(this.runtimeStateIds)
+                    + "]";
+        }
+    }
 
     public record ChunkBatchPacingDescriptor(boolean batchFinished, int batchSize)
             implements OutboundVoxelDescriptor {}
@@ -119,6 +155,36 @@ public final class PaperLcaNettyChannelHandler extends ChannelDuplexHandler {
         public static final byte KIND_CHUNK_BATCH = 1;
         public static final byte KIND_MTCF_PATCH_DELTA = 2;
         public static final byte KIND_HANDSHAKE_ACK = 3;
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof EmittedLcaNettyFrame other)) {
+                return false;
+            }
+            return this.frameKind == other.frameKind
+                    && java.util.Objects.equals(this.channel, other.channel)
+                    && java.util.Arrays.equals(this.framedPayloadBytes, other.framedPayloadBytes);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + this.frameKind;
+            result = 31 * result + java.util.Objects.hashCode(this.channel);
+            result = 31 * result + java.util.Arrays.hashCode(this.framedPayloadBytes);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "EmittedLcaNettyFrame[frameKind=" + this.frameKind
+                    + ", channel=" + this.channel
+                    + ", framedPayloadBytes=" + java.util.Arrays.toString(this.framedPayloadBytes)
+                    + "]";
+        }
     }
 
     private final LcaInMemoryChunkCoordinator coordinator;

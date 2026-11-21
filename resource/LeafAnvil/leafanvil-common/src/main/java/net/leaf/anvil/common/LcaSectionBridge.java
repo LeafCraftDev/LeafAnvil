@@ -184,6 +184,38 @@ public interface LcaSectionBridge {
      * extraction without 4,096 per-voxel `getBlockState` lookups.
      */
     record RawPaletteStorage(int bits, long[] raw, Object palette, Method valueForMethod) {
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof RawPaletteStorage other)) {
+                return false;
+            }
+            return this.bits == other.bits
+                    && java.util.Arrays.equals(this.raw, other.raw)
+                    && java.util.Objects.equals(this.palette, other.palette)
+                    && java.util.Objects.equals(this.valueForMethod, other.valueForMethod);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + this.bits;
+            result = 31 * result + java.util.Arrays.hashCode(this.raw);
+            result = 31 * result + java.util.Objects.hashCode(this.palette);
+            result = 31 * result + java.util.Objects.hashCode(this.valueForMethod);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "RawPaletteStorage[bits=" + this.bits
+                    + ", raw=" + java.util.Arrays.toString(this.raw)
+                    + ", palette=" + this.palette
+                    + ", valueForMethod=" + this.valueForMethod
+                    + "]";
+        }
     }
 
     /**
@@ -234,6 +266,57 @@ public interface LcaSectionBridge {
 
         public long[] rawWordsClone() {
             return rawWords;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof RawSectionSnapshot other)) {
+                return false;
+            }
+            return this.sectionIndex == other.sectionIndex
+                    && this.uniform == other.uniform
+                    && this.uniformStateId == other.uniformStateId
+                    && this.bitsPerEntry == other.bitsPerEntry
+                    && java.util.Arrays.equals(this.rawWords, other.rawWords)
+                    && java.util.Arrays.equals(this.paletteStateIds, other.paletteStateIds)
+                    && this.initialNonEmptyCount == other.initialNonEmptyCount
+                    && this.initialTickingBlockCount == other.initialTickingBlockCount
+                    && this.initialTickingFluidCount == other.initialTickingFluidCount
+                    && this.skyConst4 == other.skyConst4;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + this.sectionIndex;
+            result = 31 * result + Boolean.hashCode(this.uniform);
+            result = 31 * result + this.uniformStateId;
+            result = 31 * result + this.bitsPerEntry;
+            result = 31 * result + java.util.Arrays.hashCode(this.rawWords);
+            result = 31 * result + java.util.Arrays.hashCode(this.paletteStateIds);
+            result = 31 * result + this.initialNonEmptyCount;
+            result = 31 * result + this.initialTickingBlockCount;
+            result = 31 * result + this.initialTickingFluidCount;
+            result = 31 * result + this.skyConst4;
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "RawSectionSnapshot[sectionIndex=" + this.sectionIndex
+                    + ", uniform=" + this.uniform
+                    + ", uniformStateId=" + this.uniformStateId
+                    + ", bitsPerEntry=" + this.bitsPerEntry
+                    + ", rawWords=" + java.util.Arrays.toString(this.rawWords)
+                    + ", paletteStateIds=" + java.util.Arrays.toString(this.paletteStateIds)
+                    + ", initialNonEmptyCount=" + this.initialNonEmptyCount
+                    + ", initialTickingBlockCount=" + this.initialTickingBlockCount
+                    + ", initialTickingFluidCount=" + this.initialTickingFluidCount
+                    + ", skyConst4=" + this.skyConst4
+                    + "]";
         }
     }
 
@@ -860,7 +943,7 @@ public interface LcaSectionBridge {
             for (Field f : cls.getDeclaredFields()) {
                 if (!Modifier.isStatic(f.getModifiers())
                         && (f.getName().equals("states")
-                        || f.getType().getSimpleName().equals("PalettedContainer"))) {
+                        || f.getType().getSimpleName().contains("PalettedContainer"))) {
                     f.setAccessible(true);
                     cachedSectionStatesField = f;
                     return f.get(sectionOrContainer);

@@ -634,6 +634,54 @@ public final class LcaMultiTargetConsolidator {
         public boolean targetsPlayerSlot(int playerSlotIndex) {
             return isSlotTargetedByBitmap(targetBitmapWords, playerSlotIndex);
         }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof ConsolidatedMultiTargetFrame other)) {
+                return false;
+            }
+            return java.util.Arrays.equals(this.targetBitmapWords, other.targetBitmapWords)
+                    && this.recipientCount == other.recipientCount
+                    && java.util.Arrays.equals(this.sharedWireFrameBytes, other.sharedWireFrameBytes)
+                    && this.inlineDictLearnCount == other.inlineDictLearnCount
+                    && this.dictSlotReferenceHits == other.dictSlotReferenceHits
+                    && this.consolidatedKinematicCount == other.consolidatedKinematicCount
+                    && this.unConsolidatedVanillaPhysicalBytes == other.unConsolidatedVanillaPhysicalBytes
+                    && this.directHostCoalescedPhysicalBytes == other.directHostCoalescedPhysicalBytes
+                    && this.edgeRelayMulticastPhysicalBytes == other.edgeRelayMulticastPhysicalBytes;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + java.util.Arrays.hashCode(this.targetBitmapWords);
+            result = 31 * result + this.recipientCount;
+            result = 31 * result + java.util.Arrays.hashCode(this.sharedWireFrameBytes);
+            result = 31 * result + this.inlineDictLearnCount;
+            result = 31 * result + this.dictSlotReferenceHits;
+            result = 31 * result + this.consolidatedKinematicCount;
+            result = 31 * result + Long.hashCode(this.unConsolidatedVanillaPhysicalBytes);
+            result = 31 * result + Long.hashCode(this.directHostCoalescedPhysicalBytes);
+            result = 31 * result + Long.hashCode(this.edgeRelayMulticastPhysicalBytes);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "ConsolidatedMultiTargetFrame[targetBitmapWords=" + java.util.Arrays.toString(this.targetBitmapWords)
+                    + ", recipientCount=" + this.recipientCount
+                    + ", sharedWireFrameBytes=" + java.util.Arrays.toString(this.sharedWireFrameBytes)
+                    + ", inlineDictLearnCount=" + this.inlineDictLearnCount
+                    + ", dictSlotReferenceHits=" + this.dictSlotReferenceHits
+                    + ", consolidatedKinematicCount=" + this.consolidatedKinematicCount
+                    + ", unConsolidatedVanillaPhysicalBytes=" + this.unConsolidatedVanillaPhysicalBytes
+                    + ", directHostCoalescedPhysicalBytes=" + this.directHostCoalescedPhysicalBytes
+                    + ", edgeRelayMulticastPhysicalBytes=" + this.edgeRelayMulticastPhysicalBytes
+                    + "]";
+        }
     }
 
     /**
@@ -681,6 +729,39 @@ public final class LcaMultiTargetConsolidator {
         @Override
         public byte[] sharedChunkBatchBytes() {
             return sharedChunkBatchBytes.clone();
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof DecodedMultiTargetFrame other)) {
+                return false;
+            }
+            return java.util.Arrays.equals(this.targetBitmapWords, other.targetBitmapWords)
+                    && java.util.Objects.equals(this.decodedRecurringSlices, other.decodedRecurringSlices)
+                    && java.util.Objects.equals(this.decodedKinematics, other.decodedKinematics)
+                    && java.util.Arrays.equals(this.sharedChunkBatchBytes, other.sharedChunkBatchBytes);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + java.util.Arrays.hashCode(this.targetBitmapWords);
+            result = 31 * result + java.util.Objects.hashCode(this.decodedRecurringSlices);
+            result = 31 * result + java.util.Objects.hashCode(this.decodedKinematics);
+            result = 31 * result + java.util.Arrays.hashCode(this.sharedChunkBatchBytes);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "DecodedMultiTargetFrame[targetBitmapWords=" + java.util.Arrays.toString(this.targetBitmapWords)
+                    + ", decodedRecurringSlices=" + this.decodedRecurringSlices
+                    + ", decodedKinematics=" + this.decodedKinematics
+                    + ", sharedChunkBatchBytes=" + java.util.Arrays.toString(this.sharedChunkBatchBytes)
+                    + "]";
         }
     }
 

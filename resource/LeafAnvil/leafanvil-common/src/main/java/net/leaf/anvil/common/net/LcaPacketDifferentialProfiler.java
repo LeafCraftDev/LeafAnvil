@@ -605,5 +605,77 @@ public final class LcaPacketDifferentialProfiler {
                     estimateVanillaMaxPlayersForNominalKbps(500.0, 0.70)
             );
         }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof DifferentialSnapshot other)) {
+                return false;
+            }
+            return this.activePlayers == other.activePlayers
+                    && this.sampledTicks == other.sampledTicks
+                    && this.totalVanillaPackets == other.totalVanillaPackets
+                    && this.totalOptimizedPackets == other.totalOptimizedPackets
+                    && this.totalVanillaRawL7Bytes == other.totalVanillaRawL7Bytes
+                    && this.totalVanillaWireL7Bytes == other.totalVanillaWireL7Bytes
+                    && this.totalOptimizedWireL7Bytes == other.totalOptimizedWireL7Bytes
+                    && this.totalVanillaSegments == other.totalVanillaSegments
+                    && this.totalOptimizedSegments == other.totalOptimizedSegments
+                    && this.totalVanillaPhysicalWireBytes == other.totalVanillaPhysicalWireBytes
+                    && this.totalOptimizedPhysicalWireBytes == other.totalOptimizedPhysicalWireBytes
+                    && this.savedPhysicalWireBytes == other.savedPhysicalWireBytes
+                    && Double.compare(this.physicalWireReductionRatio, other.physicalWireReductionRatio) == 0
+                    && Double.compare(this.vanillaTotalKbps, other.vanillaTotalKbps) == 0
+                    && Double.compare(this.optimizedTotalKbps, other.optimizedTotalKbps) == 0
+                    && this.estimatedMaxPlayersAt350Kbps == other.estimatedMaxPlayersAt350Kbps
+                    && java.util.Arrays.equals(this.buckets, other.buckets);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + this.activePlayers;
+            result = 31 * result + Long.hashCode(this.sampledTicks);
+            result = 31 * result + Long.hashCode(this.totalVanillaPackets);
+            result = 31 * result + Long.hashCode(this.totalOptimizedPackets);
+            result = 31 * result + Long.hashCode(this.totalVanillaRawL7Bytes);
+            result = 31 * result + Long.hashCode(this.totalVanillaWireL7Bytes);
+            result = 31 * result + Long.hashCode(this.totalOptimizedWireL7Bytes);
+            result = 31 * result + Long.hashCode(this.totalVanillaSegments);
+            result = 31 * result + Long.hashCode(this.totalOptimizedSegments);
+            result = 31 * result + Long.hashCode(this.totalVanillaPhysicalWireBytes);
+            result = 31 * result + Long.hashCode(this.totalOptimizedPhysicalWireBytes);
+            result = 31 * result + Long.hashCode(this.savedPhysicalWireBytes);
+            result = 31 * result + Double.hashCode(this.physicalWireReductionRatio);
+            result = 31 * result + Double.hashCode(this.vanillaTotalKbps);
+            result = 31 * result + Double.hashCode(this.optimizedTotalKbps);
+            result = 31 * result + this.estimatedMaxPlayersAt350Kbps;
+            result = 31 * result + java.util.Arrays.hashCode(this.buckets);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "DifferentialSnapshot[activePlayers=" + this.activePlayers
+                    + ", sampledTicks=" + this.sampledTicks
+                    + ", totalVanillaPackets=" + this.totalVanillaPackets
+                    + ", totalOptimizedPackets=" + this.totalOptimizedPackets
+                    + ", totalVanillaRawL7Bytes=" + this.totalVanillaRawL7Bytes
+                    + ", totalVanillaWireL7Bytes=" + this.totalVanillaWireL7Bytes
+                    + ", totalOptimizedWireL7Bytes=" + this.totalOptimizedWireL7Bytes
+                    + ", totalVanillaSegments=" + this.totalVanillaSegments
+                    + ", totalOptimizedSegments=" + this.totalOptimizedSegments
+                    + ", totalVanillaPhysicalWireBytes=" + this.totalVanillaPhysicalWireBytes
+                    + ", totalOptimizedPhysicalWireBytes=" + this.totalOptimizedPhysicalWireBytes
+                    + ", savedPhysicalWireBytes=" + this.savedPhysicalWireBytes
+                    + ", physicalWireReductionRatio=" + this.physicalWireReductionRatio
+                    + ", vanillaTotalKbps=" + this.vanillaTotalKbps
+                    + ", optimizedTotalKbps=" + this.optimizedTotalKbps
+                    + ", estimatedMaxPlayersAt350Kbps=" + this.estimatedMaxPlayersAt350Kbps
+                    + ", buckets=" + java.util.Arrays.toString(this.buckets)
+                    + "]";
+        }
     }
 }

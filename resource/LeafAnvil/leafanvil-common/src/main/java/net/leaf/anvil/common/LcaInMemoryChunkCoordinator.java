@@ -165,6 +165,45 @@ public final class LcaInMemoryChunkCoordinator {
                     blockLightOverrides
             );
         }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof DirectCoWSaveTicket other)) {
+                return false;
+            }
+            return java.util.Objects.equals(this.key, other.key)
+                    && java.util.Objects.equals(this.column, other.column)
+                    && java.util.Arrays.equals(this.sectionSnapshots, other.sectionSnapshots)
+                    && this.flushMask == other.flushMask
+                    && java.util.Arrays.deepEquals(this.updatedSectionSkyLightOrNull, other.updatedSectionSkyLightOrNull)
+                    && java.util.Arrays.deepEquals(this.updatedSectionBlockLightOrNull, other.updatedSectionBlockLightOrNull);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + java.util.Objects.hashCode(this.key);
+            result = 31 * result + java.util.Objects.hashCode(this.column);
+            result = 31 * result + java.util.Arrays.hashCode(this.sectionSnapshots);
+            result = 31 * result + this.flushMask;
+            result = 31 * result + java.util.Arrays.deepHashCode(this.updatedSectionSkyLightOrNull);
+            result = 31 * result + java.util.Arrays.deepHashCode(this.updatedSectionBlockLightOrNull);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "DirectCoWSaveTicket[key=" + this.key
+                    + ", column=" + this.column
+                    + ", sectionSnapshots=" + java.util.Arrays.toString(this.sectionSnapshots)
+                    + ", flushMask=" + this.flushMask
+                    + ", updatedSectionSkyLightOrNull=" + java.util.Arrays.deepToString(this.updatedSectionSkyLightOrNull)
+                    + ", updatedSectionBlockLightOrNull=" + java.util.Arrays.deepToString(this.updatedSectionBlockLightOrNull)
+                    + "]";
+        }
     }
 
     private record AgentSectionRef(
@@ -298,6 +337,54 @@ public final class LcaInMemoryChunkCoordinator {
 
         public Object chunkHandle() {
             return chunkHandleRef != null ? chunkHandleRef.get() : null;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof CompletedChunkCompaction other)) {
+                return false;
+            }
+            return java.util.Objects.equals(this.worldKey, other.worldKey)
+                    && this.chunkX == other.chunkX
+                    && this.chunkZ == other.chunkZ
+                    && java.util.Objects.equals(this.chunkHandleRef, other.chunkHandleRef)
+                    && java.util.Arrays.equals(this.nmsSections, other.nmsSections)
+                    && java.util.Arrays.equals(this.snapshots, other.snapshots)
+                    && java.util.Arrays.equals(this.builtBackings, other.builtBackings)
+                    && this.enqueuedTick == other.enqueuedTick
+                    && java.util.Objects.equals(this.coldSnapshotOrNull, other.coldSnapshotOrNull);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + java.util.Objects.hashCode(this.worldKey);
+            result = 31 * result + this.chunkX;
+            result = 31 * result + this.chunkZ;
+            result = 31 * result + java.util.Objects.hashCode(this.chunkHandleRef);
+            result = 31 * result + java.util.Arrays.hashCode(this.nmsSections);
+            result = 31 * result + java.util.Arrays.hashCode(this.snapshots);
+            result = 31 * result + java.util.Arrays.hashCode(this.builtBackings);
+            result = 31 * result + Long.hashCode(this.enqueuedTick);
+            result = 31 * result + java.util.Objects.hashCode(this.coldSnapshotOrNull);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "CompletedChunkCompaction[worldKey=" + this.worldKey
+                    + ", chunkX=" + this.chunkX
+                    + ", chunkZ=" + this.chunkZ
+                    + ", chunkHandleRef=" + this.chunkHandleRef
+                    + ", nmsSections=" + java.util.Arrays.toString(this.nmsSections)
+                    + ", snapshots=" + java.util.Arrays.toString(this.snapshots)
+                    + ", builtBackings=" + java.util.Arrays.toString(this.builtBackings)
+                    + ", enqueuedTick=" + this.enqueuedTick
+                    + ", coldSnapshotOrNull=" + this.coldSnapshotOrNull
+                    + "]";
         }
     }
 
@@ -2603,6 +2690,54 @@ public final class LcaInMemoryChunkCoordinator {
             Objects.requireNonNull(packedColumns, "packedColumns");
             packedColumns = List.copyOf(packedColumns);
         }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof RegionPackedBatchFrame other)) {
+                return false;
+            }
+            return this.regionX == other.regionX
+                    && this.regionZ == other.regionZ
+                    && java.util.Objects.equals(this.payload, other.payload)
+                    && java.util.Arrays.equals(this.rawBatchBytes, other.rawBatchBytes)
+                    && java.util.Arrays.equals(this.framedWireBytes, other.framedWireBytes)
+                    && java.util.Objects.equals(this.packedColumns, other.packedColumns)
+                    && this.cleanAckCount == other.cleanAckCount
+                    && this.patchDeltaCount == other.patchDeltaCount
+                    && this.fullChunkCount == other.fullChunkCount;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + this.regionX;
+            result = 31 * result + this.regionZ;
+            result = 31 * result + java.util.Objects.hashCode(this.payload);
+            result = 31 * result + java.util.Arrays.hashCode(this.rawBatchBytes);
+            result = 31 * result + java.util.Arrays.hashCode(this.framedWireBytes);
+            result = 31 * result + java.util.Objects.hashCode(this.packedColumns);
+            result = 31 * result + this.cleanAckCount;
+            result = 31 * result + this.patchDeltaCount;
+            result = 31 * result + this.fullChunkCount;
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "RegionPackedBatchFrame[regionX=" + this.regionX
+                    + ", regionZ=" + this.regionZ
+                    + ", payload=" + this.payload
+                    + ", rawBatchBytes=" + java.util.Arrays.toString(this.rawBatchBytes)
+                    + ", framedWireBytes=" + java.util.Arrays.toString(this.framedWireBytes)
+                    + ", packedColumns=" + this.packedColumns
+                    + ", cleanAckCount=" + this.cleanAckCount
+                    + ", patchDeltaCount=" + this.patchDeltaCount
+                    + ", fullChunkCount=" + this.fullChunkCount
+                    + "]";
+        }
     }
 
     /**
@@ -3290,6 +3425,44 @@ public final class LcaInMemoryChunkCoordinator {
             int[] packedOverlayEntries,
             long updateTick
     ) {
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof InterServerSectionBlockCommit other)) {
+                return false;
+            }
+            return java.util.Objects.equals(this.worldKey, other.worldKey)
+                    && this.chunkX == other.chunkX
+                    && this.chunkZ == other.chunkZ
+                    && this.sectionIndex == other.sectionIndex
+                    && java.util.Arrays.equals(this.packedOverlayEntries, other.packedOverlayEntries)
+                    && this.updateTick == other.updateTick;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + java.util.Objects.hashCode(this.worldKey);
+            result = 31 * result + this.chunkX;
+            result = 31 * result + this.chunkZ;
+            result = 31 * result + this.sectionIndex;
+            result = 31 * result + java.util.Arrays.hashCode(this.packedOverlayEntries);
+            result = 31 * result + Long.hashCode(this.updateTick);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "InterServerSectionBlockCommit[worldKey=" + this.worldKey
+                    + ", chunkX=" + this.chunkX
+                    + ", chunkZ=" + this.chunkZ
+                    + ", sectionIndex=" + this.sectionIndex
+                    + ", packedOverlayEntries=" + java.util.Arrays.toString(this.packedOverlayEntries)
+                    + ", updateTick=" + this.updateTick
+                    + "]";
+        }
     }
 
     private final ConcurrentLinkedQueue<InterServerSectionBlockCommit> pendingInterServerCommits =
