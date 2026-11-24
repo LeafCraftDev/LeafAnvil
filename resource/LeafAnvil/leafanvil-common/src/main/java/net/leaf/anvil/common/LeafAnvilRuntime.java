@@ -1,11 +1,11 @@
 package net.leaf.anvil.common;
 
-import io.github.dailystruggle.anvil.AnvilIoPool;
 import io.github.dailystruggle.anvil.LcaRegionFileStorage;
 import io.github.dailystruggle.anvil.LcaRegionReader;
 import io.github.dailystruggle.anvil.LinearRegionReader;
 import io.github.dailystruggle.bit.PbitResult;
 import io.github.dailystruggle.server.api.AbstractModServerAccessor;
+import io.github.dailystruggle.server.api.ManagedBlockingIoExecutor;
 import io.github.dailystruggle.server.api.ServerAccessor;
 import io.github.dailystruggle.server.api.TaskHandle;
 import io.github.dailystruggle.server.api.TaskScheduler;
@@ -16,6 +16,7 @@ import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -29,6 +30,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
@@ -82,8 +84,9 @@ public final class LeafAnvilRuntime implements AutoCloseable {
     private final AtomicBoolean loadAborted = new AtomicBoolean(false);
     private final LcaWireStreamProtocol.ClientChunkSlabCache wireStreamCache =
             new LcaWireStreamProtocol.ClientChunkSlabCache();
-    private final LcaInMemoryChunkCoordinator chunkCoordinator =
-            new LcaInMemoryChunkCoordinator(wireStreamCache);
+    private final ManagedBlockingIoExecutor fallbackIoExecutor =
+            new ManagedBlockingIoExecutor("LeafAnvil-Fallback");
+    private final LcaInMemoryChunkCoordinator chunkCoordinator;
     private final LeafAnvilBitSuite bitSuite;
 
     private volatile LeafAnvilConfig config = LeafAnvilConfig.defaults();
@@ -91,6 +94,10 @@ public final class LeafAnvilRuntime implements AutoCloseable {
 
     public LeafAnvilRuntime(ServerAccessor accessor) {
         this.accessor = Objects.requireNonNull(accessor, "accessor");
+        this.chunkCoordinator = new LcaInMemoryChunkCoordinator(
+                wireStreamCache,
+                LcaInMemoryChunkCoordinator.detectC2mePresent(),
+                blockingIoExecutor());
         this.bitSuite = new LeafAnvilBitSuite(this);
         activeInstance = this;
         prewarmAnvilClasses();
@@ -180,6 +187,19 @@ public final class LeafAnvilRuntime implements AutoCloseable {
             @Override
             public void log(Level level, String message, Throwable throwable) {
                 resolvedLogger.log(level != null ? level : Level.WARNING, message, throwable);
+            }
+
+            private final ManagedBlockingIoExecutor wireIoExecutor =
+                    new ManagedBlockingIoExecutor("LeafAnvil-Wire");
+
+            @Override
+            public Executor blockingIoExecutor() {
+                return wireIoExecutor;
+            }
+
+            @Override
+            public boolean shutdownBlockingIo(Duration timeout) {
+                return wireIoExecutor.shutdownAndDrain(timeout);
             }
         };
     }
@@ -724,9 +744,24 @@ public final class LeafAnvilRuntime implements AutoCloseable {
     }
 
     /**
+     * Returns the lifecycle-managed blocking-I/O {@link Executor} from {@link ServerAccessor},
+     * falling back to a runtime-owned {@link ManagedBlockingIoExecutor} (drained in
+     * {@link #close()}) only when a bare/test accessor provides neither an I/O executor nor a
+     * scheduler.
+     */
+    public Executor blockingIoExecutor() {
+        try {
+            Executor exec = accessor.blockingIoExecutor();
+            return exec != null ? exec : fallbackIoExecutor;
+        } catch (IllegalStateException ignored) {
+            return fallbackIoExecutor;
+        }
+    }
+
+    /**
      * Dispatches asynchronous work via {@link ServerAccessor#scheduler()} (`TaskScheduler#runAsync`),
-     * falling back to {@link AnvilIoPool#get()} when no scheduler is attached so work never blocks
-     * primary/region threads or {@code ForkJoinPool.commonPool()}.
+     * falling back to {@link #blockingIoExecutor()} when no scheduler is attached so work never
+     * blocks primary/region threads or {@code ForkJoinPool.commonPool()}.
      */
     public void dispatchAsyncWork(Runnable work) {
         Objects.requireNonNull(work, "work");
@@ -734,7 +769,7 @@ public final class LeafAnvilRuntime implements AutoCloseable {
                 s -> s.runAsync(work),
                 () -> {
                     if (accessor.isPrimaryThread()) {
-                        CompletableFuture.runAsync(work, AnvilIoPool.get())
+                        CompletableFuture.runAsync(work, blockingIoExecutor())
                                 .exceptionally(ex -> {
                                     accessor.log(
                                             Level.WARNING,
@@ -752,7 +787,7 @@ public final class LeafAnvilRuntime implements AutoCloseable {
     /**
      * Schedules a tick-cadenced asynchronous pulse via {@link ServerAccessor#scheduler()}
      * (`TaskScheduler#runAsyncTimer`), or via {@link AbstractModServerAccessor#scheduleRepeatingTask}
-     * + {@link AnvilIoPool#get()} on modded carriers (`REQ-RTP-S-002`, `REQ-RTP-S-005`).
+     * + {@link #blockingIoExecutor()} on modded carriers (`REQ-RTP-S-002`, `REQ-RTP-S-005`).
      */
     public Optional<TaskHandle> scheduleAsyncPulseTimer(Runnable pulse, long delayTicks, long periodTicks) {
         Objects.requireNonNull(pulse, "pulse");
@@ -762,10 +797,11 @@ public final class LeafAnvilRuntime implements AutoCloseable {
         }
         if (accessor instanceof AbstractModServerAccessor modAccessor) {
             AtomicBoolean cancelled = new AtomicBoolean(false);
+            Executor ioExec = blockingIoExecutor();
             modAccessor.scheduleRepeatingTask(
                     () -> {
                         if (!cancelled.get()) {
-                            AnvilIoPool.get().execute(pulse);
+                            ioExec.execute(pulse);
                         }
                     },
                     delayTicks,
@@ -845,6 +881,8 @@ public final class LeafAnvilRuntime implements AutoCloseable {
             runningBatch.cancel();
         }
         chunkCoordinator.shutdownCompactionPool();
+        accessor.shutdownBlockingIo(Duration.ofSeconds(5));
+        fallbackIoExecutor.shutdownAndDrain(Duration.ofSeconds(2));
         for (AutoCloseable sub : subscriptions) {
             try {
                 sub.close();

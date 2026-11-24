@@ -9,6 +9,10 @@
     "MixinLevelChunkSection",
     "MixinPalettedContainer"
   ],
+  "client": [
+    "MixinClientChunkCache",
+    "MixinClientPacketListener"
+  ],
   "injectors": {
     "defaultRequire": 1
   }

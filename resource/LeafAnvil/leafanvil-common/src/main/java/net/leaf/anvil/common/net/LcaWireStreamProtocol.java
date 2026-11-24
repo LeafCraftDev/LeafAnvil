@@ -1700,8 +1700,24 @@ public final class LcaWireStreamProtocol {
             int chunkZ,
             long lastUpdateTick,
             long secDedSyndrome64,
-            LcaSectionBacking[] sectionBackings
+            LcaSectionBacking[] sectionBackings,
+            byte[] heightmapBytes
     ) {
+        public HydratedClientChunkCommit(
+                String dimension,
+                int chunkX,
+                int chunkZ,
+                long lastUpdateTick,
+                long secDedSyndrome64,
+                LcaSectionBacking[] sectionBackings
+        ) {
+            this(dimension, chunkX, chunkZ, lastUpdateTick, secDedSyndrome64, sectionBackings, new byte[0]);
+        }
+
+        public HydratedClientChunkCommit {
+            heightmapBytes = heightmapBytes == null ? new byte[0] : heightmapBytes;
+        }
+
         @Override
         public boolean equals(Object o) {
             if (this == o) {
@@ -1715,7 +1731,8 @@ public final class LcaWireStreamProtocol {
                     && this.chunkZ == other.chunkZ
                     && this.lastUpdateTick == other.lastUpdateTick
                     && this.secDedSyndrome64 == other.secDedSyndrome64
-                    && java.util.Arrays.equals(this.sectionBackings, other.sectionBackings);
+                    && java.util.Arrays.equals(this.sectionBackings, other.sectionBackings)
+                    && java.util.Arrays.equals(this.heightmapBytes, other.heightmapBytes);
         }
 
         @Override
@@ -1727,6 +1744,7 @@ public final class LcaWireStreamProtocol {
             result = 31 * result + Long.hashCode(this.lastUpdateTick);
             result = 31 * result + Long.hashCode(this.secDedSyndrome64);
             result = 31 * result + java.util.Arrays.hashCode(this.sectionBackings);
+            result = 31 * result + java.util.Arrays.hashCode(this.heightmapBytes);
             return result;
         }
 
@@ -1738,6 +1756,7 @@ public final class LcaWireStreamProtocol {
                     + ", lastUpdateTick=" + this.lastUpdateTick
                     + ", secDedSyndrome64=" + this.secDedSyndrome64
                     + ", sectionBackings=" + java.util.Arrays.toString(this.sectionBackings)
+                    + ", heightmapBytesLen=" + this.heightmapBytes.length
                     + "]";
         }
     }
@@ -1832,7 +1851,8 @@ public final class LcaWireStreamProtocol {
                 resolvedChunk.chunkZ(),
                 resolvedChunk.lastUpdateTick(),
                 resolvedChunk.secDedSyndrome64(),
-                backings
+                backings,
+                resolvedChunk.heightmapDeltaBytes()
         );
     }
 

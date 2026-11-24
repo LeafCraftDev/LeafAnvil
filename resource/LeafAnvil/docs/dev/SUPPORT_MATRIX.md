@@ -18,7 +18,7 @@ Yes — **LeafAnvil supports Minecraft `1.21.x` (`1.21.1`–`1.21.11`), `26.1`, 
 | **PumpkinMC (`crates/pumpkin-world`)** | `1.20.x`, `1.21.x`, `26.1`–`26.3` | None (Native Rust) | Pure-Rust `lca-format` + Direct `SectionFrame` Bridge (`[world.chunk] type = "lca"`, [`leafanvil-ADR-004`](../adr/leafanvil-ADR-004-pumpkinmc-rust-lca-direct-section-bridge-and-golden-fixtures.md)) | **Spec & Golden Fixtures Verified** |
 | **Velocity / BungeeCord** | `1.21.x`, `26.1`, `26.2`, `26.3` | Java 21+ | Pass-through for `leafanvil:cap` / `leafanvil:chunk` (`LCD2`) plugin-messaging channels; pair with **LeafShard** for cross-backend region leases | **Compatible** |
 
-### Why Minecraft `26.3` Works Without Waiting for NMS Package Rewrites
+### Version-Independent Storage Discovery (`26.2` / `26.3`)
 
 `LeafAnvil` (`NmsRegionStorageInterceptor`) discovers `RegionFileStorage` instances structurally at runtime by scanning `CraftWorld` / `ServerLevel` fields up to depth 5 across both Moonrise (`ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO`) and vanilla `ChunkMap` / `EntityPersistentStorage` handles. Because it binds to field types and `RegionFile` method descriptors rather than brittle versioned craftbukkit package strings, **Minecraft `26.2` and `26.3` work with the same universal JAR**.
 

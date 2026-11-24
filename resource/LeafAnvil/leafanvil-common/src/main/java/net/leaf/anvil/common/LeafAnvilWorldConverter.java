@@ -1,6 +1,5 @@
 package net.leaf.anvil.common;
 
-import io.github.dailystruggle.anvil.AnvilIoPool;
 import io.github.dailystruggle.anvil.AnvilReader;
 import io.github.dailystruggle.anvil.LcaRegionFileStorage;
 import io.github.dailystruggle.anvil.LcaRegionReader;
@@ -8,9 +7,10 @@ import io.github.dailystruggle.anvil.LcaRegionWriter;
 import io.github.dailystruggle.anvil.LinearRegionReader;
 import io.github.dailystruggle.anvil.RegionFileReader;
 import io.github.dailystruggle.anvil.RegionFormatRegistry;
-import io.github.dailystruggle.rtp.common.predict.BudgetPacer;
-import io.github.dailystruggle.rtp.common.predict.EwmaEstimator;
+import net.leaf.predict.BudgetPacer;
+import net.leaf.predict.EwmaEstimator;
 import io.github.dailystruggle.server.api.ServerAccessor;
+import io.github.dailystruggle.server.api.ServerAccessors;
 import io.github.dailystruggle.server.api.TaskHandle;
 
 import java.io.IOException;
@@ -174,7 +174,7 @@ public final class LeafAnvilWorldConverter {
                     200L,
                     0.0,
                     -1L,
-                    AnvilIoPool.get(),
+                    ServerAccessors.blockingIoExecutor().orElse(Runnable::run),
                     null,
                     () -> 20.0,
                     () -> 0L,
@@ -195,9 +195,14 @@ public final class LeafAnvilWorldConverter {
             int configured = workerOverride > 0 ? workerOverride : cfg.convertWorkerThreads();
             int workers = LeafAnvilConfig.resolveConvertWorkerThreads(
                     configured, LcaInMemoryChunkCoordinator.detectC2mePresent());
-            Executor asyncExecutor = accessor != null && accessor.scheduler().isPresent()
-                    ? task -> accessor.scheduler().get().runAsync(task)
-                    : AnvilIoPool.get();
+            Executor asyncExecutor;
+            if (accessor != null && accessor.scheduler().isPresent()) {
+                asyncExecutor = task -> accessor.scheduler().get().runAsync(task);
+            } else if (runtime != null) {
+                asyncExecutor = runtime.blockingIoExecutor();
+            } else {
+                asyncExecutor = ServerAccessors.blockingIoExecutor().orElse(Runnable::run);
+            }
             BiFunction<Runnable, Long, TaskHandle> timerRegistrar = runtime != null
                     ? (pulse, periodMs) -> {
                         long periodTicks = Math.max(1L, Math.round(periodMs / 50.0));
@@ -260,7 +265,9 @@ public final class LeafAnvilWorldConverter {
         }
 
         Executor resolvedAsyncExecutor() {
-            return workerExecutor != null ? workerExecutor : AnvilIoPool.get();
+            return workerExecutor != null
+                    ? workerExecutor
+                    : ServerAccessors.blockingIoExecutor().orElse(Runnable::run);
         }
     }
 
@@ -1232,7 +1239,7 @@ public final class LeafAnvilWorldConverter {
     private static TaskHandle scheduleDelayedExecutorTimer(Runnable pulse, long periodMillis) {
         AtomicBoolean cancelled = new AtomicBoolean(false);
         Executor delayed = CompletableFuture.delayedExecutor(
-                Math.max(5L, periodMillis), TimeUnit.MILLISECONDS, AnvilIoPool.get());
+                Math.max(5L, periodMillis), TimeUnit.MILLISECONDS, Runnable::run);
         Runnable[] self = new Runnable[1];
         self[0] = () -> {
             if (cancelled.get()) {

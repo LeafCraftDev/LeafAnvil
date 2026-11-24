@@ -24,12 +24,16 @@ import net.leaf.anvil.common.net.LcaWireStreamProtocol.NegotiatedSession;
 import net.leaf.anvil.common.net.LcaWireStreamProtocol.SectionWireSlice;
 import net.leaf.anvil.common.net.LcaWireStreamProtocol.ServerboundLcaChunkDigestPayload;
 
+import io.github.dailystruggle.server.api.ManagedBlockingIoExecutor;
 import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.Deque;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -40,10 +44,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
@@ -213,7 +215,7 @@ public final class LcaInMemoryChunkCoordinator {
             WeakReference<Object> sectionRef
     ) {}
 
-    private final ThreadPoolExecutor compactionExecutor;
+    private final BoundedCompactionDispatcher compactionExecutor;
     private final AtomicInteger activeBackgroundTasks = new AtomicInteger();
     private final Map<String, WorldVoxelStorageBinding> worldStorageBindings = new ConcurrentHashMap<>();
     private final Map<Integer, List<AgentSectionRef>> agentSectionIndex = new ConcurrentHashMap<>();
@@ -226,12 +228,33 @@ public final class LcaInMemoryChunkCoordinator {
     private volatile int aimdAdditiveIncrement = LcaSectionBacking.DEFAULT_AIMD_ADDITIVE_INCREMENT;
     private volatile int aimdDecayNumerator = DEFAULT_AIMD_DECAY_NUMERATOR;
     private volatile int aimdDecayShift = DEFAULT_AIMD_DECAY_SHIFT;
+    private volatile boolean clientMode;
+
+    /**
+     * Enables client-only mode, bypassing server-side dirty-chunk LRU victim scanning and
+     * background overlay compaction on Render-thread block updates (`S-005`).
+     */
+    public void setClientMode(boolean clientMode) {
+        this.clientMode = clientMode;
+    }
+
+    public boolean isClientMode() {
+        return this.clientMode;
+    }
 
     public LcaInMemoryChunkCoordinator(ClientChunkSlabCache clientSlabCache) {
-        this(clientSlabCache, detectC2mePresent());
+        this(clientSlabCache, detectC2mePresent(), null);
     }
 
     public LcaInMemoryChunkCoordinator(ClientChunkSlabCache clientSlabCache, boolean c2mePresent) {
+        this(clientSlabCache, c2mePresent, null);
+    }
+
+    public LcaInMemoryChunkCoordinator(
+            ClientChunkSlabCache clientSlabCache,
+            boolean c2mePresent,
+            Executor backingExecutor
+    ) {
         this.clientSlabCache = Objects.requireNonNull(clientSlabCache, "clientSlabCache");
         this.c2meDetected = c2mePresent;
         int cores = Math.max(1, Runtime.getRuntime().availableProcessors());
@@ -241,22 +264,131 @@ public final class LcaInMemoryChunkCoordinator {
         int workerPriority = c2mePresent
                 ? Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 2)
                 : Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 1);
-        AtomicInteger threadSeq = new AtomicInteger(1);
-        this.compactionExecutor = new ThreadPoolExecutor(
+        this.compactionExecutor = new BoundedCompactionDispatcher(
+                backingExecutor,
                 this.compactionWorkerThreads,
-                this.compactionWorkerThreads,
-                30L,
-                TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(512),
-                r -> {
-                    Thread t = Executors.defaultThreadFactory().newThread(r);
-                    t.setName("LeafAnvil-Compactor-" + threadSeq.getAndIncrement());
-                    t.setDaemon(true);
-                    t.setPriority(workerPriority);
-                    return t;
+                512,
+                workerPriority);
+    }
+
+    /**
+     * Bounded-concurrency, bounded-queue compaction facade over a caller-supplied blocking-I/O
+     * {@link Executor} (falling back to a privately owned {@link ManagedBlockingIoExecutor} only
+     * when constructed standalone outside a {@link LeafAnvilRuntime}). Preserves per-coordinator
+     * parallelism caps so compaction bursts cannot starve RTP probes sharing the host pool, and
+     * provides a deterministic shutdown drain barrier ({@code S-002}, {@code S-005}).
+     */
+    private static final class BoundedCompactionDispatcher implements Executor {
+        private final Executor delegate;
+        private final ManagedBlockingIoExecutor ownedFallback;
+        private final int maxConcurrency;
+        private final int maxQueued;
+        private final Deque<Runnable> pending = new ArrayDeque<>();
+        private final Object lock = new Object();
+        private int inFlight;
+        private volatile boolean shutdown;
+
+        BoundedCompactionDispatcher(
+                Executor backingExecutor,
+                int maxConcurrency,
+                int maxQueued,
+                int workerPriority
+        ) {
+            this.maxConcurrency = Math.max(1, maxConcurrency);
+            this.maxQueued = Math.max(1, maxQueued);
+            if (backingExecutor != null) {
+                this.delegate = backingExecutor;
+                this.ownedFallback = null;
+            } else {
+                this.ownedFallback = new ManagedBlockingIoExecutor(
+                        "LeafAnvil-Compactor", this.maxConcurrency, workerPriority);
+                this.delegate = this.ownedFallback;
+            }
+        }
+
+        boolean isShutdown() {
+            return shutdown;
+        }
+
+        @Override
+        public void execute(Runnable task) {
+            Objects.requireNonNull(task, "task");
+            boolean dispatchNow = false;
+            synchronized (lock) {
+                if (shutdown) {
+                    throw new RejectedExecutionException("LeafAnvil compaction dispatcher is shut down");
                 }
-        );
-        this.compactionExecutor.allowCoreThreadTimeOut(true);
+                if (inFlight < maxConcurrency) {
+                    inFlight++;
+                    dispatchNow = true;
+                } else if (pending.size() < maxQueued) {
+                    pending.addLast(task);
+                } else {
+                    throw new RejectedExecutionException("LeafAnvil compaction queue is full");
+                }
+            }
+            if (dispatchNow) {
+                submitToDelegate(task);
+            }
+        }
+
+        private void submitToDelegate(Runnable firstTask) {
+            try {
+                delegate.execute(() -> runLoop(firstTask));
+            } catch (RuntimeException ex) {
+                synchronized (lock) {
+                    inFlight--;
+                    if (inFlight == 0) {
+                        lock.notifyAll();
+                    }
+                }
+                throw ex;
+            }
+        }
+
+        private void runLoop(Runnable current) {
+            Runnable task = current;
+            while (task != null) {
+                try {
+                    task.run();
+                } finally {
+                    synchronized (lock) {
+                        task = shutdown ? null : pending.pollFirst();
+                        if (task == null) {
+                            inFlight--;
+                            if (inFlight == 0) {
+                                lock.notifyAll();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        void shutdownAndDrain(long timeout, TimeUnit unit) {
+            long deadlineNanos = System.nanoTime() + Math.max(0L, unit.toNanos(timeout));
+            synchronized (lock) {
+                shutdown = true;
+                pending.clear();
+                while (inFlight > 0) {
+                    long remaining = deadlineNanos - System.nanoTime();
+                    if (remaining <= 0L) {
+                        break;
+                    }
+                    long millis = remaining / 1_000_000L;
+                    int nanos = (int) (remaining % 1_000_000L);
+                    try {
+                        lock.wait(millis, nanos);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+            if (ownedFallback != null) {
+                ownedFallback.shutdownAndDrain(Duration.ofMillis(Math.max(100L, unit.toMillis(timeout))));
+            }
+        }
     }
 
     /**
@@ -1015,13 +1147,15 @@ public final class LcaInMemoryChunkCoordinator {
                     storageBinding.runtimeIdToCanonical()
             );
         }
-        for (int i = 0; i < backings.length; i++) {
-            LcaSectionBacking backing = backings[i];
-            if (backing != null) {
-                final int sectionIdx = i;
-                backing.setAimdAdditiveIncrement(this.aimdAdditiveIncrement);
-                backing.setSectionMutationListener((sec, tick) ->
-                        recordSectionSlabMutation(colWorldKey, chunkX, sectionIdx, chunkZ, column, sec, tick));
+        if (!this.clientMode) {
+            for (int i = 0; i < backings.length; i++) {
+                LcaSectionBacking backing = backings[i];
+                if (backing != null) {
+                    final int sectionIdx = i;
+                    backing.setAimdAdditiveIncrement(this.aimdAdditiveIncrement);
+                    backing.setSectionMutationListener((sec, tick) ->
+                            recordSectionSlabMutation(colWorldKey, chunkX, sectionIdx, chunkZ, column, sec, tick));
+                }
             }
         }
         if (nmsLevelChunkSectionsOrNull != null) {
@@ -1492,15 +1626,7 @@ public final class LcaInMemoryChunkCoordinator {
      * Cleanly shuts down the background compaction worker pool.
      */
     public void shutdownCompactionPool() {
-        compactionExecutor.shutdown();
-        try {
-            if (!compactionExecutor.awaitTermination(2L, TimeUnit.SECONDS)) {
-                compactionExecutor.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            compactionExecutor.shutdownNow();
-            Thread.currentThread().interrupt();
-        }
+        compactionExecutor.shutdownAndDrain(2L, TimeUnit.SECONDS);
         inFlightChunkKeys.clear();
         completedChunkCompactions.clear();
         dirtyOverlayChunkKeys.clear();
@@ -1703,7 +1829,7 @@ public final class LcaInMemoryChunkCoordinator {
             LcaSectionBacking sectionBacking,
             long tick
     ) {
-        if (column == null || column.isUnloaded() || sectionBacking == null || sectionBacking.isUnloaded()) {
+        if (this.clientMode || column == null || column.isUnloaded() || sectionBacking == null || sectionBacking.isUnloaded()) {
             return;
         }
         column.markSectionMutated(sectionIndex, tick);
@@ -2070,10 +2196,10 @@ public final class LcaInMemoryChunkCoordinator {
                 } finally {
                     flushingDirtyChunks.remove(key);
                     pruneCleanChunkFromDirtyLru(key, col);
-                    activeBackgroundTasks.decrementAndGet();
                     if (dirtyChunkCount() > this.maxDirtyChunks) {
                         flushExcessDirtyChunksAsync();
                     }
+                    activeBackgroundTasks.decrementAndGet();
                 }
             });
             return true;
@@ -3339,66 +3465,75 @@ public final class LcaInMemoryChunkCoordinator {
 
         // 1. Reserve monotonic Netty arrival sequence number BEFORE off-thread decode
         long arrivalSeq = clientCommitQueue.reserveNettyArrivalSequence();
-
-        // 2. Unwrap Netty frame, expand MTCF/ODCT section references, decode .lca batch & verify SEC-DED off-thread
-        LcaOrderlessDictTable effectiveClientDict = clientDictTableOrNull != null
-                ? clientDictTableOrNull
-                : clientOrderlessDictTable;
-        byte[] innerPayload = isDirectInnerPayloadMagic(framedBatchBytes)
-                ? framedBatchBytes
-                : (proxySafeStoredZlibFrame
-                        ? LcaWireStreamProtocol.decodeProxySafeZlibStoredFrame(framedBatchBytes)
-                        : LcaWireStreamProtocol.decodeNettyVarIntZeroBypassFrame(framedBatchBytes));
-        if (isMultiTargetFrameMagic(innerPayload)) {
-            LcaMultiTargetConsolidator.DecodedMultiTargetFrame mtcf =
-                    LcaMultiTargetConsolidator.decodeMultiTargetTickFrame(innerPayload, effectiveClientDict);
-            innerPayload = mtcf.sharedChunkBatchBytes();
-            if (innerPayload.length < 2) {
-                clientCommitQueue.publishReadyAtSequence(arrivalSeq, () -> {});
-                return arrivalSeq;
+        boolean published = false;
+        try {
+            // 2. Unwrap Netty frame, expand MTCF/ODCT section references, decode .lca batch & verify SEC-DED off-thread
+            LcaOrderlessDictTable effectiveClientDict = clientDictTableOrNull != null
+                    ? clientDictTableOrNull
+                    : clientOrderlessDictTable;
+            byte[] innerPayload = isDirectInnerPayloadMagic(framedBatchBytes)
+                    ? framedBatchBytes
+                    : (proxySafeStoredZlibFrame
+                            ? LcaWireStreamProtocol.decodeProxySafeZlibStoredFrame(framedBatchBytes)
+                            : LcaWireStreamProtocol.decodeNettyVarIntZeroBypassFrame(framedBatchBytes));
+            if (isMultiTargetFrameMagic(innerPayload)) {
+                LcaMultiTargetConsolidator.DecodedMultiTargetFrame mtcf =
+                        LcaMultiTargetConsolidator.decodeMultiTargetTickFrame(innerPayload, effectiveClientDict);
+                innerPayload = mtcf.sharedChunkBatchBytes();
+                if (innerPayload.length < 2) {
+                    clientCommitQueue.publishReadyAtSequence(arrivalSeq, () -> {});
+                    published = true;
+                    return arrivalSeq;
+                }
             }
-        }
-        ClientboundLcaChunkBatchPayload decodedBatch = isRawBatchMagic(innerPayload)
-                ? LcaWireStreamProtocol.deserializeRawChunkBatch(innerPayload, effectiveClientDict)
-                : LcaWireStreamProtocol.decodeChunkBatchPayload(innerPayload, session, effectiveClientDict);
-        Function<SectionWireSlice, LcaSectionBacking> hydrator = sectionHydrator != null
-                ? sectionHydrator
-                : LcaWireStreamProtocol::hydrateDefaultSectionBacking;
+            ClientboundLcaChunkBatchPayload decodedBatch = isRawBatchMagic(innerPayload)
+                    ? LcaWireStreamProtocol.deserializeRawChunkBatch(innerPayload, effectiveClientDict)
+                    : LcaWireStreamProtocol.decodeChunkBatchPayload(innerPayload, session, effectiveClientDict);
+            Function<SectionWireSlice, LcaSectionBacking> hydrator = sectionHydrator != null
+                    ? sectionHydrator
+                    : LcaWireStreamProtocol::hydrateDefaultSectionBacking;
 
-        List<HydratedClientChunkCommit> hydratedCommits = new ArrayList<>(decodedBatch.entries().size());
-        for (BatchChunkEntry entry : decodedBatch.entries()) {
-            ClientRevisitApplyResult revisitResult = LcaWireStreamProtocol.applyClientRevisitEntry(
-                    clientSlabCache,
-                    dimension,
-                    decodedBatch.regionX(),
-                    decodedBatch.regionZ(),
-                    entry,
-                    null
-            );
-            if (revisitResult.resolvedChunk() != null) {
-                hydratedCommits.add(LcaWireStreamProtocol.hydrateClientChunkOffThread(
+            List<HydratedClientChunkCommit> hydratedCommits = new ArrayList<>(decodedBatch.entries().size());
+            for (BatchChunkEntry entry : decodedBatch.entries()) {
+                ClientRevisitApplyResult revisitResult = LcaWireStreamProtocol.applyClientRevisitEntry(
+                        clientSlabCache,
                         dimension,
-                        revisitResult.resolvedChunk(),
-                        hydrator
-                ));
+                        decodedBatch.regionX(),
+                        decodedBatch.regionZ(),
+                        entry,
+                        null
+                );
+                if (revisitResult.resolvedChunk() != null) {
+                    hydratedCommits.add(LcaWireStreamProtocol.hydrateClientChunkOffThread(
+                            dimension,
+                            revisitResult.resolvedChunk(),
+                            hydrator
+                    ));
+                }
+            }
+
+            // 3. Publish ready commit action at its exact Netty arrival sequence number
+            clientCommitQueue.publishReadyAtSequence(arrivalSeq, () -> {
+                for (HydratedClientChunkCommit commit : hydratedCommits) {
+                    attachChunkColumn(
+                            commit.dimension(),
+                            commit.chunkX(),
+                            commit.chunkZ(),
+                            commit.sectionBackings(),
+                            null,
+                            commit.lastUpdateTick()
+                    );
+                    mainThreadChunkAttacher.accept(commit);
+                }
+            });
+            published = true;
+            return arrivalSeq;
+        } finally {
+            if (!published) {
+                // Release reserved sequence slot so one decode error never head-of-line deadlocks subsequent chunks (S-004).
+                clientCommitQueue.publishReadyAtSequence(arrivalSeq, () -> {});
             }
         }
-
-        // 3. Publish ready commit action at its exact Netty arrival sequence number
-        clientCommitQueue.publishReadyAtSequence(arrivalSeq, () -> {
-            for (HydratedClientChunkCommit commit : hydratedCommits) {
-                attachChunkColumn(
-                        commit.dimension(),
-                        commit.chunkX(),
-                        commit.chunkZ(),
-                        commit.sectionBackings(),
-                        null,
-                        commit.lastUpdateTick()
-                );
-                mainThreadChunkAttacher.accept(commit);
-            }
-        });
-        return arrivalSeq;
     }
 
     public ClientOrderedBatchCommitQueue clientCommitQueue() {
