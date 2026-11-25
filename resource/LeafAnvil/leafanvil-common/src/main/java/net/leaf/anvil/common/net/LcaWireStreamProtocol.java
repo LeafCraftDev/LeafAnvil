@@ -291,7 +291,7 @@ public final class LcaWireStreamProtocol {
 
     /**
      * Packs a 12-bit voxel position (`0..4095`) and 19-bit block-state registry ID into a non-zero
-     * 32-bit `dirtyOverlay` entry (`((pos12 + 1) << 19) | (stateId19 & 0x7FFFF)`).
+     * 32-bit `dirtyOverlay` entry ({@code ((pos12 + 1) << 19) | (stateId19 & 0x7FFFF)}).
      */
     public static int packDirtyOverlayEntry(int pos12, int stateId19) {
         if (pos12 < 0 || pos12 > 0xFFF) {
@@ -312,7 +312,7 @@ public final class LcaWireStreamProtocol {
     }
 
     /**
-     * Computes the 10-bit region-local chunk index `((chunkZ & 31) << 5) | (chunkX & 31)`.
+     * Computes the 10-bit region-local chunk index {@code ((chunkZ & 31) << 5) | (chunkX & 31)}.
      */
     public static int toLocalChunkIndex10(int chunkX, int chunkZ) {
         return ((chunkZ & 31) << 5) | (chunkX & 31);
@@ -1152,7 +1152,7 @@ public final class LcaWireStreamProtocol {
      * `[VarInt(packetLength), VarInt(dataLength), 0x78, 0x01, storedBlocks..., Adler32]`.
      *
      * <p>Produces a valid non-zero `dataLength` header and RFC 1950 Zlib stream (adding only `11 B`
-     * for batches `<= 65,535 B`) with zero LZ77/Huffman CPU overhead, guaranteeing compatibility
+     * for batches {@code <= 65,535 B}) with zero LZ77/Huffman CPU overhead, guaranteeing compatibility
      * with Velocity and BungeeCord reverse proxies that reject `dataLength == 0` frames larger than
      * `network-compression-threshold` (`256 B`).</p>
      */

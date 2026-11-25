@@ -136,7 +136,7 @@ public final class LcaOrderlessDictTable {
     }
 
     /**
-     * Packs `(slotId12, tag8)` into a 16-bit wire reference word (`(slotId12 << 4) | tag4`).
+     * Packs `(slotId12, tag8)` into a 16-bit wire reference word ({@code (slotId12 << 4) | tag4}).
      */
     public static int packRefWord16(int slotId12, byte tag8) {
         if (slotId12 < 0 || slotId12 >= TABLE_SLOT_COUNT) {
@@ -258,7 +258,7 @@ public final class LcaOrderlessDictTable {
     }
 
     /**
-     * Resolves a 16-bit wire slot reference (`(slotId12 << 4) | tag4`), failing closed with an
+     * Resolves a 16-bit wire slot reference ({@code (slotId12 << 4) | tag4}), failing closed with an
      * {@link IOException} if the slot is unpopulated or its 4-bit verification tag mismatches
      * (`REQ-RTP-S-004`).
      */

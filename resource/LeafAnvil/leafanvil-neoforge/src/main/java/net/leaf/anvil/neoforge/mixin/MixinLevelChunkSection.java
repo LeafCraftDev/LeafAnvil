@@ -18,9 +18,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
  * Live `LevelChunkSection` Mixin on NeoForge binding {@link LcaSectionBacking} (`leafanvil-ADR-002`
- * & `leafanvil-ADR-003`).
+ * &amp; `leafanvil-ADR-003`).
  *
- * <p>Masks `(x & 15)`, `(y & 15)`, `(z & 15)` at entry, evicts `this.states` to a `0-bit`
+ * <p>Masks {@code (x & 15)}, {@code (y & 15)}, {@code (z & 15)} at entry, evicts `this.states` to a `0-bit`
  * `ZeroBitStorage` shell on attachment, and publishes `nonEmptyBlockCount` after updating
  * `dirtyOverlay` and `dirtyOctantMask64` (`Invariant 1`).</p>
  *

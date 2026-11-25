@@ -3228,7 +3228,7 @@ public final class LcaInMemoryChunkCoordinator {
 
     /**
      * Generic outbound chunk batch packer that orders candidates by Chebyshev spiral priority ring
-     * (`Ring 0` `r <= 2` immediate playable terrain first), promotes recurring non-uniform section
+     * (`Ring 0` {@code r <= 2} immediate playable terrain first), promotes recurring non-uniform section
      * slices into {@link #orderlessDictTable()} when {@code CAP_ORDERLESS_DICT_AND_MULTICAST} is
      * negotiated, paces against any configured {@link #maxServerUploadKbps()} ceiling (or full
      * per-credit budget when `0`), and records the Layer-7 and Layer-3/Layer-4 wire differential
@@ -3259,7 +3259,7 @@ public final class LcaInMemoryChunkCoordinator {
 
     /**
      * Packs outbound chunks for a player on a `500 kbps` (`350 kbps` usable) uplink, ordering
-     * candidates by spiral priority ring (`Ring 0` `r <= 2` immediate playable terrain first),
+     * candidates by spiral priority ring (`Ring 0` {@code r <= 2} immediate playable terrain first),
      * deducting current-tick non-chunk and TCP framing traffic from the global server upload
      * ceiling, and recording the chunk packet/byte differential into {@link #packetDifferentialProfiler()}.
      */

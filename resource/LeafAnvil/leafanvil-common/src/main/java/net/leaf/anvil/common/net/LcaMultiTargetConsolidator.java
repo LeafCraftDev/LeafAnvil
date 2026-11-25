@@ -69,7 +69,7 @@ public final class LcaMultiTargetConsolidator {
      * Classifies a chunk coordinate into one of three spiral priority rings relative to the player's
      * current chunk center:
      * <ul>
-     *   <li>{@link #RING_0_IMMEDIATE} (`r <= 2`): `25` chunks immediately under and around the player</li>
+     *   <li>{@link #RING_0_IMMEDIATE} ({@code r <= 2}): `25` chunks immediately under and around the player</li>
      *   <li>{@link #RING_1_MIDFIELD} (`r = 3..6`): active walking and combat visibility ring</li>
      *   <li>{@link #RING_2_HORIZON} (`r >= 7`): horizon chunks served from `LCAD` revisit cache or idle trickle</li>
      * </ul>
@@ -127,7 +127,7 @@ public final class LcaMultiTargetConsolidator {
      * global usable upload cap (`usableUploadKbps`, e.g., `350 kbps` for a `500 kbps` nominal link).
      * <p>
      * Deducts live non-chunk Layer-7 traffic and Layer-3/Layer-4 TCP framing headers first, then
-     * prioritizes players with pending {@link #RING_0_IMMEDIATE} (`r <= 2`) chunks so joining or
+     * prioritizes players with pending {@link #RING_0_IMMEDIATE} ({@code r <= 2}) chunks so joining or
      * teleporting players receive immediate terrain before horizon chunks are trickle-filled.
      */
     public static int[] allocateLowBandwidthTickBudgets(

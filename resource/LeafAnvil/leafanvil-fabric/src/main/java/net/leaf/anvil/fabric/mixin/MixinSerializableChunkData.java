@@ -27,7 +27,7 @@ import java.util.WeakHashMap;
 import java.util.logging.Level;
 
 /**
- * Direct `SerializableChunkData` <-> `.lca` `ChunkFrame` + sparse `DirtyChunkLruCache` Mixin on
+ * Direct `SerializableChunkData` &lt;-&gt; `.lca` `ChunkFrame` + sparse `DirtyChunkLruCache` Mixin on
  * Fabric (`leafanvil-ADR-005` Workstream 2, `leafanvil-ADR-006`).
  *
  * <p>Avoids adding non-static fields onto the Java `record` `SerializableChunkData` by tracking

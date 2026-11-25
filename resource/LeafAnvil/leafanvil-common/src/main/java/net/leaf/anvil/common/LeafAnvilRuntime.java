@@ -608,7 +608,7 @@ public final class LeafAnvilRuntime implements AutoCloseable {
     }
 
     /**
-     * Returns the in-memory `LcaSectionBacking` and wire-stream coordinator (`leafanvil-ADR-002` & `leafanvil-ADR-003`).
+     * Returns the in-memory `LcaSectionBacking` and wire-stream coordinator (`leafanvil-ADR-002` &amp; `leafanvil-ADR-003`).
      */
     public LcaInMemoryChunkCoordinator chunkCoordinator() {
         return chunkCoordinator;

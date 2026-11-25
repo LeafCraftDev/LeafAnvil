@@ -35,9 +35,9 @@ import java.util.logging.Level;
  * <ul>
  *   <li>`/leafanvil status` - Inspect attached worlds, BIT health, open `.lca` handles, and migrated regions</li>
  *   <li>`/leafanvil bit` - Execute Built-In Test (`[LCA bit]`) PBIT and CBIT compatibility diagnostics</li>
- *   <li>`/leafanvil convert [world=<name|all>] [format=<lca|mca>] [workers=<n|auto>]` - Paced region conversion between `.mca`/`.linear` and `.lca`</li>
- *   <li>`/leafanvil compact [world=<name|all>]` - Flush and compact fragmented `.lca` `256B` slabs</li>
- *   <li>`/leafanvil heal [world=<name|all>] [workers=<n|auto>]` - Paced 4-tier SEC-DED + reverse-scan + quarantine + CoW rollback bit-rot recovery</li>
+ *   <li>{@code /leafanvil convert [world=<name|all>] [format=<lca|mca>] [workers=<n|auto>]} - Paced region conversion between `.mca`/`.linear` and `.lca`</li>
+ *   <li>{@code /leafanvil compact [world=<name|all>]} - Flush and compact fragmented `.lca` `256B` slabs</li>
+ *   <li>{@code /leafanvil heal [world=<name|all>] [workers=<n|auto>]} - Paced 4-tier SEC-DED + reverse-scan + quarantine + CoW rollback bit-rot recovery</li>
  *   <li>`/leafanvil pause` / `/leafanvil resume` / `/leafanvil cancel` - Cooperative batch task controls</li>
  *   <li>`/leafanvil reload` - Reload `config.yml` and `messages.yml`</li>
  * </ul>
