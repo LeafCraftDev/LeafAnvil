@@ -217,7 +217,7 @@ Each 64-bit big-endian pointer word `ptr64` is packed as:
 | Bits | Width | Field | Formula & Semantics |
 | :--- | :--- | :--- | :--- |
 | `63..29` | `35 bits` | `slabOffset35` | `(ptr64 >>> 29) & 0x7_FFFF_FFFFL`. File byte offset of the chunk's `ChunkFrame` is `slabOffset35 << 8` (256-byte units, addressing up to `8 TiB`). **`0` = ungenerated / absent chunk** (`ptr64 == 0L`). |
-| `28` | `1 bit` | `codec1` | `(int) ((ptr64 >>> 28) & 1L)`.<br>- `0` = **Mode A**: Uncompressed `ChunkFrame` (`0-LZ` direct random access).<br>- `1` = **Mode B**: Uncompressed `ChunkFrame` header + `headerWords` SEC-DED bytes + Continuous Atomic Region Dictionary (`LCD2`, `0x4C44`) compressed body (Section 6.2). |
+| `28` | `1 bit` | `codec1` | `(int) ((ptr64 >>> 28) & 1L)`.<br>- `0` = **Mode A**: Uncompressed `ChunkFrame` (direct random access, no outer entropy wrapper).<br>- `1` = **Mode B**: Uncompressed `ChunkFrame` header + `headerWords` SEC-DED bytes + Continuous Atomic Region Dictionary (`LCD2`, `0x4C44`) compressed body (Section 6.2). |
 | `27..8` | `20 bits` | `exactByteLen20` | `(int) ((ptr64 >>> 8) & 0xFFFFFL)`. Exact on-disk byte length of the `ChunkFrame` (`1 .. 1,048,575 B`). Number of 256-byte sub-slabs occupied on disk is `allocatedSlabs = (exactByteLen20 + 255) >>> 8`. |
 | `7..0` | `8 bits` | `generation8` | `(int) (ptr64 & 0xFFL)`. Monotonically incrementing wrapping save counter (`0..255`) used for lock-free ABA read verification and cache invalidation. |
 
@@ -256,6 +256,37 @@ The root dictionary segment starts at byte offset `0x2040` with total byte capac
 
 ### 5.1 Dictionary Segment Layout (`Root` or `Continuation`)
 
+#### `formatVersion = 0x0003` (`LCA-ICD-3.0`, Factored Content-Agnostic Dictionary)
+In `formatVersion >= 0x0003`, Layer 2 factors block states into region-local `BaseBlock` and `PropTuple` tables (`anvil-api-ADR-006`), preserving `usedPayloadBytes` at `+0x06..+0x07` so Word-0-first `(72, 64)` `SEC-DED` healing (Section 5.4) is byte-compatible with `0x0002`:
+
+```
+Offset +0x00: uint16  segmentStateCount      // BlockState entries in this segment (0..65535)
+Offset +0x02: uint16  segmentBiomeCount      // Biome entries in this segment (0..16384)
+Offset +0x04: uint16  segmentBaseBlockCount  // BaseBlock entries in this segment (0..65535)
+Offset +0x06: uint16  usedPayloadBytes       // Active bytes in [+0x08 .. +0x08 + usedPayloadBytes)
+                                             // (Must be 0 [empty segment] or >= 2 -> CBIT T5)
+Offset +0x08: uint16  segmentPropTupleCount  // PropTuple entries in this segment (0..65535)
+Offset +0x0A: BaseBlockEntry[segmentBaseBlockCount]:
+                VarInt  utf8ByteLen
+                byte[]  baseBlockUtf8        // Full namespaced ID (e.g. "minecraft:stone", "create:cogwheel")
+              PropTupleEntry[segmentPropTupleCount]:
+                VarInt  utf8ByteLen
+                byte[]  propTupleUtf8        // Canonical "[k1=v1,...]" (must start '[' and end ']' -> CBIT T5)
+              BlockStateEntry[segmentStateCount]:
+                VarInt  baseBlockId          // Causal bound: 0 <= baseBlockId < totalBaseBlocksSoFar (CBIT T5)
+                VarInt  propTupleIdPlusOne   // 0 = bare block; >= 1 -> PropTuple[id - 1] (<= totalPropTuplesSoFar)
+                uint32  materialPacked       // RGBA8 color + LeafMap material flags
+              BiomeEntry[segmentBiomeCount]:
+                VarInt  utf8ByteLen
+                byte[]  biomeIdUtf8          // Full namespaced biome ID
+                uint32  foliageAndWaterTint  // Packed tint metadata
+              byte[]  patternArenaSlice      // Optional forward-indexed LCD2 Huffman + cross-chunk byte patterns
+              byte[]  slackPadding           // Zero-filled slack between active payload and downward-growing SEC-DED
+              uint8   secDedSyndromes[W]     // Downward-growing (72, 64) SEC-DED syndromes at (cap - 8 - 1 - w)
+Offset +cap-8: uint64 nextSegmentLinkTrailer // ALWAYS at the final 8 bytes of the segment
+```
+
+#### Legacy `formatVersion = 0x0002` (`LCA-ICD-1.0`, Flat Canonical Strings)
 ```
 Offset +0x00: uint32  segmentStateCount      // Number of BlockState entries in this segment
 Offset +0x04: uint16  segmentBiomeCount      // Number of Biome entries in this segment
@@ -723,9 +754,25 @@ Each 16-bit big-endian entry `entry16 = sectionOffsets[i]` has three cases:
    - **Order-Independent Upper Bound `relEnd_i`:** `SectionFrame`s are not required to appear in monotonic vertical index order `i = 0 .. sectionCount - 1` (for example, a single modified section may be re-encoded and appended into the chunk's `256-byte` sub-slab slack either immediately before `residualRelStart` or after the Residual Tail). The upper bound `relEnd_i` of `SectionFrame` `i` is the smallest boundary offset strictly greater than `relStart_i`:
      $$\mathtt{relEnd}_i = \min\Bigl(\{\mathtt{relStart}_j \mid \mathtt{relStart}_j > \mathtt{relStart}_i\} \cup \{B \in \{\mathtt{residualRelStart}, \mathtt{frameLen}\} \mid B > \mathtt{relStart}_i\}\Bigr)$$
 
-### 6.5 Slab-Local Chunk Micro-Palette (`Part A` + `Part B`)
+### 6.5 Slab-Local Chunk Micro-Palette (`0x0003` Pure-ID vs. Legacy `0x0002` `Part A` + `Part B`)
 
 When `hasSlabLocalPalette == 1` (`chunkFlags` bit `1`), the initial Slab-Local Micro-Palette starts immediately at `sectionDirEnd` (`24 + 2 * sectionCount`) and ends at $\min_k(\mathtt{relStart}_k)$ across all non-uniform sections $k$ (or `residualRelStart` if no non-uniform section precedes `residualRelStart`), with zero tail padding when `scaleOffsets == 0`. Incremental chunk patches (`boilerplateFlags16` bit `14` = `0x4000`, `HAS_CHUNK_PATCH_TAIL`, Section 8.3) may append additional local entries (`localStateIdx = localStateCount .. localStateCount + appendedStateCount - 1`) without shifting or re-sorting indices `0 .. localStateCount - 1`.
+
+#### `formatVersion = 0x0003` (`LCA-ICD-3.0`, Pure Layer 2 ID Micro-Palette)
+In `formatVersion >= 0x0003`, Layer 3 micro-palettes store **pure Layer 2 `VarInt` IDs** with zero `STATIC_CORE_*` tokens, zero inline UTF-8 strings, and no Part B property-binding table (`anvil-api-ADR-006`). `hasSlabLocalPalette == 1` remains valid regardless of total Layer 2 dictionary cardinality (including `> 8,192` modded states):
+
+```
++-----------------------------------------------------------------------+ Offset sectionDirEnd
+| 1. VarInt  localStateCount                       (0 .. 4096, CBIT T5) |
+| 2. VarInt  localStateGlobalIds[localStateCount]  (0 .. S-1,  CBIT T7) |
+| 3. VarInt  localBiomeCount                       (0 .. 1024, CBIT T5) |
+| 4. VarInt  localBiomeGlobalIds[localBiomeCount]  (0 .. M-1,  CBIT T7) |
+| 5. VarInt  biomeTemplateCount                    (0 .. 64,   CBIT T5) |
+| 6. BiomeTemplate[biomeTemplateCount]             (4x4x4 XZY-RLE)      |
++-----------------------------------------------------------------------+
+```
+
+#### Legacy `formatVersion = 0x0002` (`LCA-ICD-1.0`, `Part A` + `Part B`, Quarantined in `LcaV2LegacyCodec`)
 
 ```
 +-----------------------------------------------------------------------+ Offset sectionDirEnd
@@ -998,7 +1045,8 @@ Mojang packs `256` 9-bit column heights ($16 \times 16$) into `long[37]` (`7` en
 | `11` | `0x0800` | Non-voxel chunk root (`entities/` or `poi/`): do **not** synthesize voxel chunk keys (`xPos`, `yPos`, `zPos`, `LastUpdate`, `InhabitedTime`, `Status`, `sections`); return only `DataVersion` + residual `TAG_Compound` entries |
 | `12` | `0x1000` | The residual `TAG_Compound` slice (`bit 10`) is `Zlib` (`DEFLATE`) compressed (used only in `Mode A` when residual NBT $\ge 256\text{ B}$; never set in `Mode B`) |
 | `13` | `0x2000` | Read `VarInt mbnlByteLen` + `byte[mbnlByteLen] mbnlStream` immediately following `boilerplateFlags16` and decode `"MOTION_BLOCKING_NO_LEAVES"` into `"Heightmaps"` (Section 8.1) |
-| `14` | `0x4000` | `HAS_CHUNK_PATCH_TAIL`: Read `VarInt patchTailByteLen` + `byte[patchTailByteLen] chunkPatchTail` immediately before `bit 10` (`residualNbtSlice`), containing appended Slab-Local Micro-Palette entries and per-section voxel/light/offset patches (Section 8.3) |
+| `14` | `0x4000` | `HAS_CHUNK_PATCH_TAIL`: Read `VarInt patchTailByteLen` + `byte[patchTailByteLen] chunkPatchTail` immediately before `bit 15` / `bit 10` (`residualNbtSlice`), containing appended Slab-Local Micro-Palette entries and per-section voxel/light/offset patches (Section 8.3) |
+| `15` | `0x8000` | `HAS_EXTENDED_FLAGS` (`formatVersion >= 0x0003` only; `CBIT T5` in `<= 0x0002`): Read `VarInt extFlags` + length-prefixed O(1) residual sub-streams (`block_ticks`, `fluid_ticks`, `block_entities`, sparse `PostProcessing`, dictionary-encoded `structures`) strictly after `bit 14` and before `bit 10` (Section 11.3) |
 
 ### 8.3 `ChunkPatchTail` Wire Layout (`boilerplateFlags16` Bit `14` = `0x4000`, `HAS_CHUNK_PATCH_TAIL`)
 
@@ -1055,16 +1103,16 @@ Placing `bit 14` (`0x4000`) with a `VarInt patchTailByteLen` prefix immediately 
 ```
 
 - **Pre-Section Resolution Order:** When `hasResidualNbt == 1` and `(boilerplateFlags16 & 0x4000) != 0`, readers decode `ChunkPatchTail` *before* iterating `sectionOffsets[0 .. sectionCount - 1]`:
-  1. Appended `BaseBlockEntry[M]` and `PropBinding` items extend the chunk's Slab-Local Micro-Palette from size `K` to `K + M`.
+  1. In **`formatVersion >= 0x0003`**, item 1 of `ChunkPatchTail` stores `VarInt appendedStateCount` followed directly by `VarInt appendedGlobalStateIds[appendedStateCount]` (pure Layer 2 BlockState IDs, `0 .. S-1`, `CBIT T7`; no `STATIC_CORE_*` tokens and no `PropBinding` list). In legacy **`formatVersion <= 0x0002`**, item 1 stores `BaseBlockEntry[M]` and `PropBinding` items (`LcaV2LegacyCodec`). Both extend the chunk's Slab-Local Micro-Palette from size `K` to `K + M`.
   2. Any `SectionPatch` with `hasReplacementSectionOffset` (`0x02`) updates `entries[sectionIndex]` (and `relStarts[sectionIndex]`).
   3. Inline-uniform sections (`(entry16 & 0x8000) != 0`) and non-uniform `SectionFrame`s can therefore reference appended local palette indices `K .. K + M - 1` directly.
   4. After decoding base section `i` (whether originally void `0x0000`, inline-uniform `0x8000`, or a non-uniform `SectionFrame` validated by `CBIT T6b`), any `hasVoxelDeltas`, `hasSkyLightPatch`, or `hasBlockLightPatch` entries for `sectionIndex == i` are applied on top.
 
 ---
 
-## 9. Static Core Lookup Tables (`STATIC_CORE_*`)
+## 9. Legacy `0x0002` Static Core Lookup Tables (`STATIC_CORE_*`)
 
-To decode Slab-Local Micro-Palettes (`Part A` and `Part B`, Section 6.5), readers must use these exact 0-indexed arrays from `LcaSectionCodec.java`:
+> **Quarantine Notice (`formatVersion = 0x0003`, `anvil-api-ADR-006`):** `STATIC_CORE_STATES`, `STATIC_CORE_BIOMES`, and `STATIC_CORE_PROP_SUFFIXES` are **retired in `formatVersion = 0x0003` (`LCA-ICD-3.0`)** and quarantined in `LcaV2LegacyCodec.java`. No `0x0003` encoder or decoder reads or emits any `STATIC_CORE_*` token. The frozen 0-indexed tables below are retained solely for backward-compatible decoding of legacy `formatVersion = 0x0002` Slab-Local Micro-Palettes (`Part A` and `Part B`, Section 6.5) and `ChunkPatchTail` (§8.3).
 
 ### 9.1 `STATIC_CORE_STATES` (`160` Base Block Identifiers)
 - Index `0..127`: encoded in Part A as `uint8 (0x80 | id)`
@@ -1221,7 +1269,7 @@ When `LcaRegionReader.healRegionBitRot(byte[])` or a fault-tolerant reader encou
      - Probe whether the slab at `bytePos` is `Mode B` (`slabModeB`: `LCD2` frame magic `0x4C, 0x44` (`"LD"`) at `bytePos + headerLen + headerWords` or valid inline `headerWords` SEC-DED syndromes on a zero-body header). Read `dvWord = readInt32BE(bytePos)`. If `slabModeB` is `true`, evaluate Tier 1 header SEC-DED healing over a scratch copy of `[bytePos .. bytePos + headerLen)` using `[bytePos + headerLen .. bytePos + headerLen + headerWords)`.
      - If `(dvWord & 0xFC00_0000) == 0x5800_0000`, extract `slabChunkIdx = (dvWord >>> 16) & 0x03FF`.
      - If `needsSlabScan[slabChunkIdx]` is `true`, commit any healed `Mode B` header words and compute the frame's byte length `exactLen` using `slabModeB`:
-       - **In Mode A (`slabModeB == false`, `codec1 == 0`):** Read `chunkFlags = buf[bytePos + 0x15] & 0xFF`, `unitShift = ((chunkFlags & 4) != 0) ? 2 : 0`, and `residualRel = readUint16BE(bytePos + 0x16)`. Let `residualStart = bytePos + sectionDirEnd + (residualRel << unitShift)`. If `(chunkFlags & 1) == 0`, `exactLen = sectionDirEnd + (residualRel << unitShift)`. Otherwise read `bpFlags = readUint16BE(residualStart)` and advance past each active `boilerplateFlags16` field (`bit 13` `VarInt mbnlLen` + `mbnlStream`, `bit 5..9` fields, `bit 14` (`0x4000`) `VarInt patchTailByteLen` + `chunkPatchTail`, and `bit 10` residual NBT or any appended post-residual `SectionFrame`s up to the next `0x5800_0000` slab header or `"LCA1_END"` footer).
+       - **In Mode A (`slabModeB == false`, `codec1 == 0`):** Read `chunkFlags = buf[bytePos + 0x15] & 0xFF`, `unitShift = ((chunkFlags & 4) != 0) ? 2 : 0`, and `residualRel = readUint16BE(bytePos + 0x16)`. Let `residualStart = bytePos + sectionDirEnd + (residualRel << unitShift)`. If `(chunkFlags & 1) == 0`, `exactLen = sectionDirEnd + (residualRel << unitShift)`. Otherwise read `bpFlags = readUint16BE(residualStart)` and advance past each active `boilerplateFlags16` field (`bit 13` `VarInt mbnlLen` + `mbnlStream`, `bit 5..9` fields, `bit 14` (`0x4000`) `VarInt patchTailByteLen` + `chunkPatchTail`, `bit 15` (`0x8000`) `VarInt extFlags` + length-prefixed sub-streams `0x01`, `0x02`, `0x04`, `0x08`, `0x10`, and `bit 10` residual NBT or any appended post-residual `SectionFrame`s up to the next `0x5800_0000` slab header or `"LCA1_END"` footer).
        - **In Mode B (`slabModeB == true`, `codec1 == 1`):** At `compStart = bytePos + sectionDirEnd + headerWords`, verify the 2-byte `LCD2` magic `0x4C, 0x44` (`"LD"`) and read `uint24BE compressedBodyLen` at `compStart + 3..5` to obtain `exactLen = sectionDirEnd + headerWords + compressedBodyLen`.
      - Reconstruct `ptr64 = ((long) slab << 29) | ((slabModeB ? 1L : 0L) << 28) | ((exactLen & 0xFFFFFL) << 8) | 1L`, write `ptr64` to `0x0040 + (slabChunkIdx << 3)`, and write `computeHammingSecDed8(ptr64)` to `secDedTableByteOffset + slabChunkIdx`.
 3. **Tier 3 - Section-Granular `octreeOccupancyMask64` Quarantine (`CBIT T6`, `T6b`):**
@@ -1233,17 +1281,32 @@ When `LcaRegionReader.healRegionBitRot(byte[])` or a fault-tolerant reader encou
 
 Archives created under `formatVersion = 0x0001` (`LCA_FORMAT_VERSION_V1`) share the identical 64-byte superblock, 8 KiB pointer directory, chained shared dictionary, SEC-DED syndrome tables, `ChunkFrame` headers, and residual NBT layout as `formatVersion = 0x0002`, differing only in section-level `octreeOccupancyMask64` cursor domain compaction (Section 7 item 4) and Gray light `planeModes8` `mode 01` sub-headers (Section 7 item 6).
 
+### 10.4 Format Version `0x0002` $\to$ `0x0003` Atomic Upgrade Procedure
+
+1. **Non-Mutating Read Path:** Read-only `LcaRegionReader` operations decode `formatVersion = 0x0002` archives losslessly via `LcaV2LegacyCodec` without modifying bytes on disk.
+2. **Atomic Writable Upgrade (`REQ-RTP-S-004`):** Opening a `0x0002` `.lca` file for live writes (`LcaRegionWriter#openLiveArchive`, `LcaRegionFileStorage#getOrOpenRegion`) or invoking world conversion/healing (`LeafAnvilWorldConverter`) invokes `LcaRegionWriter.upgradeLegacyArchiveAtomically`:
+   - Reads and validates all generated chunks from the `0x0002` archive, transcodes them into a fresh `0x0003` archive (factored Layer 2 dictionary + pure-ID Layer 3 micro-palettes, preserving Mode A/Mode B or applying the requested `lcd2Level`),
+   - Writes the upgraded archive to a sibling `.v3upgrade.tmp` file with `FileChannel.force(true)`, atomically replaces the target via `ATOMIC_MOVE` (+ parent directory fsync on POSIX), invalidates `LcaRegionReader` file caches, and cleans up `.tmp` on any error.
+
 ---
 
 ## 11. Format Version `0x0003` (`LCA-ICD-3.0`) Normative Extensions
 
-Archives written with superblock `formatVersion == 0x0003` (`0x08..0x09`) retain the identical 64-byte superblock, 8 KiB pointer directory, chained shared dictionary, SEC-DED syndrome tables, `ChunkFrame` headers, `LCD2` (`0x4C44`) `Mode B` framing, and footer canary (`"LCA1_END"`). Readers accept `formatVersion` $\in \{\mathtt{0x0002}, \mathtt{0x0003}\}$ (`CBIT T1` rejects `0x0000`, `0x0001`, and `>= 0x0004`). Any `0x0003` sentinel encountered inside a `formatVersion == 0x0002` archive fails closed (`CBIT T5`/`T7`).
+Archives written with superblock `formatVersion == 0x0003` (`0x08..0x09`) retain the identical 64-byte superblock, 8 KiB pointer directory, chained `SEC-DED`-protected dictionary layout (`0x2040`, factored into `BaseBlock`/`PropTuple`/`BlockState`/`Biome` per Section 5.1), `ChunkFrame` headers, pure-ID Layer 3 micro-palettes & `ChunkPatchTail` (Sections 6.5 & 8.3), `LCD2` (`0x4C44`) `Mode B` framing, and footer canary (`"LCA1_END"`). Readers accept `formatVersion` $\in \{\mathtt{0x0002}, \mathtt{0x0003}\}$ (`CBIT T1` rejects `0x0000`, `0x0001`, and `>= 0x0004`). Any `0x0003` sentinel encountered inside a `formatVersion == 0x0002` archive fails closed (`CBIT T5`/`T7`).
 
 ### 11.1 `SectionFrame` Extension Escape (`paletteLen == 0`, `secExtFlags`)
 - In `formatVersion >= 0x0003` with `blockEncodingMode` $\in \{\mathtt{01}, \mathtt{11}\}$, a leading `paletteLen == 0` (`0x00`) introduces:
-  - `uint8 secExtFlags` (`bit 0 = 0x01`: `RANK_EXCLUDED`; bits `7..1` reserved and must be `0`, else `CBIT T5`), followed by
-  - `VarInt actualPaletteLen` (`2 .. 4096`, else `CBIT T7`).
-- When `RANK_EXCLUDED` (`0x01`) is set, each minority container $p \in [1, \text{paletteLen}-1]$ encodes runs over the successively compacted unclaimed domain $D_p = D_{p-1} \setminus S_{p-1}$ (`LcaV3Codec#decodeRankExcludedDeltaRoaringBlocks`) and enforces mandatory `CBIT T6b` (`decodedOctreeMask64 == expectedOctreeMask64`). Because rank-exclusion increases `readChunkView` latency, default `v3` encoders keep `RANK_EXCLUDED` opt-in for archival compaction while decoders support it unconditionally.
+  - `uint8 secExtFlags`:
+    - `0x01`: `SEC_EXT_RANK_EXCLUDED` (Adaptive Successive Rank-Exclusion)
+    - `0x02`: `SEC_EXT_GRAY_BITPLANES` (Dominant-Pinned Adjacency-Ordered Local Gray Bitplanes, `anvil-api-ADR-006`)
+    - Bits `0` and `1` are mutually exclusive (`0x03` fails closed `CBIT T5`); bits `7..2` are reserved and must be `0` (`CBIT T5`).
+  - `VarInt actualPaletteLen` (`2 .. 4096`, else `CBIT T7`), followed by `VarInt dictIds[actualPaletteLen]`.
+- **Mode `0x01` (`SEC_EXT_RANK_EXCLUDED`):** Each minority container $p \in [1, \text{paletteLen}-1]$ encodes runs over the successively compacted unclaimed domain $D_p = D_{p-1} \setminus S_{p-1}$ (`LcaV3Codec#decodeRankExcludedDeltaRoaringBlocks`) and enforces mandatory `CBIT T6b` (`decodedOctreeMask64 == expectedOctreeMask64`). Opt-in for archival compaction; decoders support it unconditionally.
+- **Mode `0x02` (`SEC_EXT_GRAY_BITPLANES`, `anvil-api-ADR-006`):** Dominant `dictIds[0]` is pinned (preserving `octreeOccupancyMask64` skipping and Tier-3 dominant-stratum recovery), while minority states `dictIds[1 .. actualPaletteLen - 1]` are ordered by local 3D curve adjacency. Immediately after `dictIds[actualPaletteLen]`:
+  - `VarInt payloadByteLen` (`>= ceil(b / 4)` where `b = ceil(log2(actualPaletteLen))`, bounded by section limit -> `CBIT T5`), enabling $O(1)$ `LcaSectionCodec#skipSectionFrame` (`REQ-RTP-S-005`).
+  - `byte[ceil(b / 4)] planeModes`: `2` bits per Gray bitplane `j = 0 .. b - 1` (`00 = Const0`, `01 = TieredSubHdr/RLE/CrossPlaneXOR`, `11 = RawPackedBits (ceil(activeVoxels / 8) B)`, `10 = Forbidden -> CBIT T5`; unused tail bits in the final byte must be `0` -> `CBIT T5`).
+  - `byte[] planePayloads[0..b-1]`: Reflected Binary Gray bitplanes `g(v) = p(v) ^ (p(v) >>> 1)` over the `activeVoxels` active-octant curve domain.
+  - On decode (`LcaV3Codec#decodeGrayBitplaneBlocks`), each active voxel computes `p = invGray(g)`, validates `0 <= p < actualPaletteLen` (`CBIT T6`), and enforces `decodedOctreeMask64 == expectedOctreeMask64` (`CBIT T6b`). Opt-in via `FEATURE_GRAY_BITPLANES` for stratified structures/schematics; decoders support it unconditionally.
 
 ### 11.2 Block-Conditioned Eikonal Light Residuals + `ADR-005` `B1` (`sentinelHdr`)
 - In `formatVersion >= 0x0003` (`storageKind != 3`), when `skyLightMode == 10` or `blockLightMode == 10`, if `(firstByte & 0x03) == 0x02` (`sentinelHdr`), the channel encodes an Eikonal light residual rather than 4-bitplane `GrayPlanes`:
@@ -1256,9 +1319,18 @@ Archives written with superblock `formatVersion == 0x0003` (`0x08..0x09`) retain
   - Inside `payloadByteLen`: optional `topFaceSeed` (when `subMode == 2`), `uint8 residualEncodingMode` (`0x00 = B1` `64-bit` octant-bitmask + per-active-octant `64-bit` voxel mask + packed 4-bit non-zero modular residuals `(actual - hatL) & 0x0F`, `lo | (hi << 4)`).
 - **`LCA_LIGHT_TABLE_V1` (`LcaV3Codec#classifyLightV1`):** Frozen static classifier mapping canonical blockstate strings to `(opacity4 << 4) | (emission4 & 0x0F)`, explicitly classifying `minecraft:tinted_glass` as opacity `15` and running bounded 6-connected fixed-point Eikonal relaxation (`int[4096]` circular ring + `long[64]` `inQueue` deduplication). Enabled by default in `Mode B` (`LCD2`) and opt-in in `Mode A` (`0-LZ`) to preserve `Mode A` live-save latency below `.mca` `Zlib`.
 
-### 11.3 `boilerplateFlags16` Bit `15` (`0x8000`) Columnar Ticks & Template `block_entities`
+### 11.3 `boilerplateFlags16` Bit `15` (`0x8000`) Extended O(1) Residual Sub-Streams (`extFlags`)
 - In `formatVersion >= 0x0003`, `boilerplateFlags16` bit `15` (`0x8000`, `HAS_EXTENDED_FLAGS`) appears strictly after `Bit 14` (`ChunkPatchTail`) and strictly before `Bit 10` (`residualNbtSlice`):
-  - `VarInt extFlags`: `bit 0 = 0x01` (`block_ticks`), `bit 1 = 0x02` (`fluid_ticks`), `bit 2 = 0x04` (`block_entities`), bits `3..31` reserved (`0`, else `CBIT T5`). Mutual exclusion with empty-list bits `0, 1, 2` is enforced (`CBIT T5`).
-  - Each active sub-stream is framed by `VarInt subStreamByteLen` + payload:
-    - `ColumnarTickStream`: `VarInt count` (`1..65536`), `uint8 tickFlags` (`bit 0 = allInChunkXZ`, `bit 1 = allPriorityZero`), unique ID dictionary (`(utfLen << 1) | mcPrefixBit`), optional `idOrds`, packed `XZ` (`(lx << 4) | lz`) or `ZigZagVarLong` `dX/dZ`, `ZigZagVarLong` `deltaY`, `deltaT`, and optional `p`. Non-vanilla schemas fall back losslessly to `Bit 10`.
-    - `ColumnarBlockEntityStream`: `VarInt count` (`1..16384`), `uint8 beFlags` (`bit 0 = allInChunkXYZ`), template table (`VarInt templateCount`, `[VarInt byteLen, rawNbtCompoundBodyWithTagEnd]`), and per-instance template ordinal + `x,y,z` / `Pos[3]` coordinates.
+  - `VarInt extFlags`:
+    - `bit 0 = 0x01`: `EXT_FLAG_COLUMNAR_BLOCK_TICKS` (`block_ticks`)
+    - `bit 1 = 0x02`: `EXT_FLAG_COLUMNAR_FLUID_TICKS` (`fluid_ticks`)
+    - `bit 2 = 0x04`: `EXT_FLAG_COLUMNAR_BLOCK_ENTITIES` (`block_entities`)
+    - `bit 3 = 0x08`: `EXT_FLAG_SPARSE_POST_PROCESSING` (`PostProcessing`)
+    - `bit 4 = 0x10`: `EXT_FLAG_DICT_STRUCTURES` (`structures`)
+    - `bits 5..31`: reserved (`0`, else `CBIT T5`).
+  - **Mutual exclusion (`CBIT T5`):** `bpFlags` bit `1` (`0x0002`) vs `extFlags` `0x01`; `bpFlags` bit `2` (`0x0004`) vs `extFlags` `0x02`; `bpFlags` bit `0` (`0x0001`) vs `extFlags` `0x04`; `bpFlags` bit `5` (`0x0020`) vs `extFlags` `0x08`; `bpFlags` bit `4` (`0x0010`) vs `extFlags` `0x10`.
+  - Each active sub-stream is emitted in ascending bit order (`0x01`, `0x02`, `0x04`, `0x08`, `0x10`) and framed by `VarInt subStreamByteLen` + payload (enabling $O(1)$ skip):
+    - `ColumnarTickStream` (`0x01`, `0x02`): `VarInt count` (`1..65536`), `uint8 tickFlags` (`bit 0 = allInChunkXZ`, `bit 1 = allPriorityZero`), unique ID dictionary (`(utfLen << 1) | mcPrefixBit`), optional `idOrds`, packed `XZ` (`(lx << 4) | lz`) or `ZigZagVarLong` `dX/dZ`, `ZigZagVarLong` `deltaY`, `deltaT`, and optional `p`. Non-vanilla schemas fall back losslessly to `Bit 10`.
+    - `ColumnarBlockEntityStream` (`0x04`): `VarInt count` (`1..16384`), `uint8 beFlags` (`bit 0 = allInChunkXYZ`), template table (`VarInt templateCount`, `[VarInt byteLen, rawNbtCompoundBodyWithTagEnd]`), and per-instance template ordinal + `x,y,z` / `Pos[3]` coordinates.
+    - `SparsePostProcessingStream` (`0x08`): `uint8 sectionCount` (`1..255`), `VarInt activeCount` (`1..sectionCount`), followed by `activeCount` strictly increasing section records: `uint8 secIdx` (`0..sectionCount-1`), `VarInt shortCount` (`1..4096`), and `shortCount` `ZigZagVarInt` deltas (`cur - prev`, with `prev = 0` initially, unsigned 16-bit short values). Reconstructs exact `TAG_List("PostProcessing")` of `sectionCount` `TAG_List<TAG_Short>` sublists.
+    - `DictStructuresStream` (`0x10`): Self-contained, lossless recursive compact NBT encoding of `TAG_Compound("structures")` (zero Zstd/Zlib, zero inter-chunk dependence): `VarInt localStringCount` (`0..65536`), `localStringCount` `[VarInt utf8Len, byte[utf8Len]]` entries appended after the frozen `STATIC_STRUCT_STRINGS` built-in dictionary (`113` universal vanilla structure keys/IDs, `0 B` on disk), followed by the compound body (bounded to depth `<= 64`, `CBIT T5`) where every tag key and `TAG_String` value is a `VarInt` dictionary ID, `TAG_Short`/`TAG_Int`/`TAG_Long` use `ZigZagVarInt`/`ZigZagVarLong`, `6`-element `TAG_Int_Array` bounding boxes (`BB`) encode chunk-relative `(minX - (cx << 4), minY, minZ - (cz << 4), maxX - minX, maxY - minY, maxZ - minZ)` as `ZigZagVarInt`s, and other `TAG_Int_Array`/`TAG_Long_Array` elements use `ZigZagVarInt`/`ZigZagVarLong`.

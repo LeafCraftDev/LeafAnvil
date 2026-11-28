@@ -577,6 +577,81 @@ class LcaWireStreamProtocolTest {
         assertEquals(0, section0.getStateId(0, 0, 0));
     }
 
+    @Test
+    @DisplayName("LcaRemoteStreamCodec full chunks with dirty overlays and heightmaps decode cleanly in LcaWireStreamProtocol")
+    void lcaRemoteStreamCodecFullChunkWithOverlaysAndHeightmapsDecodesCleanlyInLcaWireStreamProtocol() throws IOException {
+        int[] voxels = new int[4096];
+        for (int i = 0; i < 4096; i++) {
+            voxels[i] = (i & 1) == 0 ? 1 : 9;
+        }
+        LcaSectionBacking.EncodedCompactFrame compact = LcaSectionBacking.encodeCompactSectionFrame(voxels, 15, 0);
+        int packedOverlay = io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.packDirtyOverlayEntry(42, 77);
+        List<io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.SectionWireSlice> remoteSlices = List.of(
+                io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.SectionWireSlice.uniform(0, 15, 0, 1),
+                io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.SectionWireSlice.nonUniform(
+                        1, compact.frameBytes(), new int[]{packedOverlay}
+                ),
+                io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.SectionWireSlice.uniform(2, 15, 0, 0)
+        );
+        byte[] hmBytes = new byte[]{1, 2, 3, 4, 5};
+        io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.EntryFullChunk remoteChunk =
+                io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.EntryFullChunk.createWithComputedSyndrome(
+                        3, -2, 123L, remoteSlices, hmBytes
+                );
+
+        byte[] lcd2Wire = io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.encodeChunkBatch(
+                3 >> 5, -2 >> 5, List.of(remoteChunk), false, true
+        );
+        NegotiatedSession session = new NegotiatedSession(
+                true, LcaWireStreamProtocol.ALL_CAPABILITIES, 32768, 0x1234L
+        );
+        LcaOrderlessDictTable clientDict = new LcaOrderlessDictTable();
+        ClientboundLcaChunkBatchPayload decoded =
+                LcaWireStreamProtocol.decodeChunkBatchPayload(lcd2Wire, session, clientDict);
+        assertEquals(1, decoded.entries().size());
+        EntryFullChunk decodedFull = assertInstanceOf(EntryFullChunk.class, decoded.entries().get(0));
+        assertEquals(3, decodedFull.chunkX());
+        assertEquals(-2, decodedFull.chunkZ());
+        assertEquals(3, decodedFull.sections().size());
+        assertArrayEquals(new int[]{packedOverlay}, decodedFull.sections().get(1).dirtyOverlayEntries());
+        assertArrayEquals(hmBytes, decodedFull.heightmapDeltaBytes());
+    }
+
+    @Test
+    @DisplayName("Failed batch decode releases reserved arrivalSeq so subsequent chunks are never head-of-line deadlocked")
+    void failedBatchDecodeDoesNotDeadlockSubsequentOrderedClientCommits() throws IOException {
+        net.leaf.anvil.common.LcaInMemoryChunkCoordinator coordinator =
+                new net.leaf.anvil.common.LcaInMemoryChunkCoordinator(new ClientChunkSlabCache(8 * 1024 * 1024));
+        NegotiatedSession session = new NegotiatedSession(
+                true, LcaWireStreamProtocol.ALL_CAPABILITIES, 32768, 0x1234L
+        );
+        List<HydratedClientChunkCommit> committed = new ArrayList<>();
+
+        // 1. Corrupt batch throws IOException after reserving arrivalSeq = 0
+        byte[] corruptBatch = new byte[]{0x4C, 0x43, 0x41, 0x42, 0x00, 0x00, (byte) 0xFF};
+        assertThrows(IOException.class, () -> coordinator.receiveClientChunkBatchOrdered(
+                "minecraft:overworld", corruptBatch, true, session, coordinator.clientOrderlessDictTable(), null, committed::add
+        ));
+
+        // 2. Subsequent valid chunk batch at arrivalSeq = 1 MUST still drain and commit immediately
+        io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.EntryFullChunk validChunk =
+                io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.EntryFullChunk.createWithComputedSyndrome(
+                        4, 5, 50L,
+                        List.of(io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.SectionWireSlice.uniform(0, 15, 0, 1)),
+                        new byte[0]
+                );
+        byte[] validWire = io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.encodeChunkBatch(
+                0, 0, List.of(validChunk), true, true
+        );
+        coordinator.receiveClientChunkBatchOrdered(
+                "minecraft:overworld", validWire, true, session, coordinator.clientOrderlessDictTable(), null, committed::add
+        );
+        coordinator.clientCommitQueue().drainReadyInStrictNettyOrder();
+        assertEquals(1, committed.size(), "Valid batch after decode error must not be deadlocked in clientCommitQueue");
+        assertEquals(4, committed.get(0).chunkX());
+        assertEquals(5, committed.get(0).chunkZ());
+    }
+
     // =========================================================================
     // Test Fixture Builders
     // =========================================================================
@@ -859,6 +934,11 @@ class LcaWireStreamProtocolTest {
                     clientRx.coordinator().getTrackedChunk("minecraft:overworld", 4, -2);
             assertNotNull(clientCol);
             assertEquals(45, clientCol.section(3).getStateId(1, 2, 3));
+            assertTrue(clientRx.coordinator().isClientMode(), "LcaClientWireReceiver must run coordinator in clientMode");
+            clientCol.mutateVoxel(3, 4, 5, 6, 77, 210L);
+            assertEquals(77, clientCol.section(3).getStateId(4, 5, 6));
+            assertEquals(0, clientRx.coordinator().dirtyChunkCount(),
+                    "clientMode must bypass server-side dirtyChunkLru victim scanning on block updates");
 
             byte[] digestBytes = clientRx.buildRegionRevisitDigestBytes("minecraft:overworld", 4 >> 5, -2 >> 5);
             ServerboundLcaChunkDigestPayload digest = ServerboundLcaChunkDigestPayload.fromBytes(digestBytes);
@@ -875,6 +955,102 @@ class LcaWireStreamProtocolTest {
         } finally {
             clientRx.coordinator().shutdownCompactionPool();
             serverTx.shutdownCompactionPool();
+        }
+    }
+
+    @Test
+    @DisplayName("Direct Mode A, SimpleBitStorage flat-bitpack, O(1) passthrough, and incremental ODCT dictionary decode bit-identically in LcaClientWireReceiver")
+    void directModeAFlatBitpackAndIncrementalOdctDecodeBitIdentically() throws IOException {
+        // 1. Build a Mode A section directly via LcaModeABlockSection and export without decompression
+        int[] modeAVoxels = new int[4096];
+        for (int i = 0; i < 4096; i++) {
+            modeAVoxels[i] = (i % 19 == 0) ? 14 : ((i % 7 == 0) ? 9 : 1);
+        }
+        io.github.dailystruggle.anvil.LcaModeABlockSection modeA =
+                io.github.dailystruggle.anvil.LcaModeABlockSection.encodeFromRuntimeVoxels(modeAVoxels);
+        assertNotNull(modeA);
+        byte[] modeAWire = modeA.toWireSectionFrameBytes();
+
+        // 2. Build a 4-bit SimpleBitStorage section (10 palette entries -> flatBits=4, 1:1 long copy)
+        int[] pal10 = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+        long[] raw4 = new long[256];
+        int[] expected4 = new int[4096];
+        for (int i = 0; i < 4096; i++) {
+            int ord = (i * 7 + (i >>> 4)) % 10;
+            expected4[i] = pal10[ord];
+            raw4[i >>> 4] |= ((long) ord) << ((i & 15) << 2);
+        }
+        byte[] flat4Wire = io.github.dailystruggle.anvil.LcaModeABlockSection
+                .encodeFlatBitpackFromSimpleBitStorage(pal10, 4, raw4);
+        assertNotNull(flat4Wire);
+
+        // 3. Build a 4-bit SimpleBitStorage section with only 4 palette entries (repacks to 2-bit = 1024 B)
+        int[] pal4 = {0, 1, 9, 34};
+        long[] raw2in4 = new long[256];
+        int[] expected2 = new int[4096];
+        for (int i = 0; i < 4096; i++) {
+            int ord = (i + (i >>> 6)) & 3;
+            expected2[i] = pal4[ord];
+            raw2in4[i >>> 4] |= ((long) ord) << ((i & 15) << 2);
+        }
+        byte[] flat2Wire = io.github.dailystruggle.anvil.LcaModeABlockSection
+                .encodeFlatBitpackFromSimpleBitStorage(pal4, 4, raw2in4);
+        assertNotNull(flat2Wire);
+
+        List<io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.SectionWireSlice> slices = new ArrayList<>(4);
+        slices.add(io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.SectionWireSlice.uniform(0, 15, 0, 1));
+        slices.add(io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.SectionWireSlice.nonUniform(1, modeAWire, new int[0]));
+        slices.add(io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.SectionWireSlice.nonUniform(2, flat4Wire, new int[0]));
+        slices.add(io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.SectionWireSlice.nonUniform(3, flat2Wire, new int[0]));
+
+        io.github.dailystruggle.anvil.stream.LcaOrderlessDictWireTable serverDict =
+                new io.github.dailystruggle.anvil.stream.LcaOrderlessDictWireTable(1);
+        io.github.dailystruggle.anvil.stream.LcaOrderlessDictWireTable.KnownSlotBitSet knownSlots =
+                new io.github.dailystruggle.anvil.stream.LcaOrderlessDictWireTable.KnownSlotBitSet();
+
+        io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.EntryFullChunk entry1 =
+                io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.EntryFullChunk.createWithComputedSyndrome(
+                        5, -3, 100L, slices, new byte[0]);
+        byte[] packet1 = io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.encodeChunkBatchDirect(
+                5 >> 5, -3 >> 5, List.of(entry1), true, true, serverDict, knownSlots);
+
+        // Second chunk with identical slices must emit 0 learn entries and 2-byte ODCT references (much smaller!)
+        io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.EntryFullChunk entry2 =
+                io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.EntryFullChunk.createWithComputedSyndrome(
+                        6, -3, 101L, slices, new byte[0]);
+        byte[] packet2 = io.github.dailystruggle.anvil.stream.LcaRemoteStreamCodec.encodeChunkBatchDirect(
+                6 >> 5, -3 >> 5, List.of(entry2), true, true, serverDict, knownSlots);
+        assertTrue(packet2.length < packet1.length / 4,
+                "Second packet with already-known ODCT dictionary entries must be drastically smaller: p1="
+                        + packet1.length + ", p2=" + packet2.length);
+
+        // Decode both packets on the Fabric client receiver (which uses LcaWireStreamProtocol + LcaOrderlessDictTable)
+        LcaClientWireReceiver clientRx = new LcaClientWireReceiver();
+        long parityHash = 0x1122334455667788L;
+        try {
+            byte[] hs = clientRx.buildClientHandshakeBytes(parityHash);
+            assertTrue(clientRx.onServerHandshakeAck(hs, parityHash).isLcaStreamActive());
+
+            assertEquals(1, clientRx.onChunkBatchPayloadReceived("minecraft:overworld", packet1, false, parityHash, null));
+            assertEquals(1, clientRx.onChunkBatchPayloadReceived("minecraft:overworld", packet2, false, parityHash, null));
+
+            for (int cx : new int[]{5, 6}) {
+                net.leaf.anvil.common.LcaInMemoryChunkCoordinator.TrackedChunkColumn col =
+                        clientRx.coordinator().getTrackedChunk("minecraft:overworld", cx, -3);
+                assertNotNull(col, "Chunk (" + cx + ",-3) must be hydrated");
+                assertEquals(1, col.section(0).getStateId(0, 0, 0));
+                int[] decodedModeA = new int[4096];
+                LcaSectionBacking.decodeCompactBaseFrameInto(col.section(1).baseFrame(), 0, decodedModeA);
+                assertArrayEquals(modeAVoxels, decodedModeA, "Mode A section must round-trip bit-identically");
+                int[] decodedFlat4 = new int[4096];
+                LcaSectionBacking.decodeCompactBaseFrameInto(col.section(2).baseFrame(), 0, decodedFlat4);
+                assertArrayEquals(expected4, decodedFlat4, "4-bit SimpleBitStorage flat-bitpack must round-trip bit-identically");
+                int[] decodedFlat2 = new int[4096];
+                LcaSectionBacking.decodeCompactBaseFrameInto(col.section(3).baseFrame(), 0, decodedFlat2);
+                assertArrayEquals(expected2, decodedFlat2, "2-bit repacked flat-bitpack must round-trip bit-identically");
+            }
+        } finally {
+            clientRx.coordinator().shutdownCompactionPool();
         }
     }
 }

@@ -234,7 +234,7 @@ I handle support directly through Discord and GitHub:
 
 ## Links
 
-- [**`.lca` Binary Interface Control Document (`ICD.md`, MIT)**](../../../../api/anvil-api/docs/ICD.md): self-contained byte-exact `.lca` specification (`LCA-ICD-1.0`), curve formulas, checksum/Hamming algorithms, and static token tables (also packed inside `{{jar}}` and extracted to `<config-dir>/ICD.md`)
+- [**`.lca` Binary Interface Control Document (`ICD.md`, MIT)**](../../../../api/anvil-api/docs/ICD.md): self-contained byte-exact `.lca` specification (`LCA-ICD-3.0`), curve formulas, `extFlags` O(1) residual streams, and checksum/Hamming algorithms (also packed inside `{{jar}}` and extracted to `<config-dir>/ICD.md`)
 - [**Open-Source `.lca` Codec & Prefilter Library (`anvil-api`, MIT)**](../../../../api/anvil-api/README.md): public MIT Java reader, writer, `.lca <-> .mca` transcoder (`LcaRegionReader`, `LcaRegionWriter`), and Maven/JitPack coordinates
 - [**Commands & Permissions Reference (`COMMANDS.md`)**](../admin/COMMANDS.md): `/leafanvil` (`/lca`) subcommands, parameters, and permission nodes
 - [**Configuration & Benchmark Reference (`CONFIGURATION.md`)**](../admin/CONFIGURATION.md): `config.yml`, `messages.yml`, and the 120-run multi-platform `.lca` vs `.mca` / `.linear` / `.b_linear` statistical summary

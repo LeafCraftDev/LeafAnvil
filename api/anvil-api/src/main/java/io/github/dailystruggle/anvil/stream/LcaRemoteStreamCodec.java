@@ -83,7 +83,7 @@ public final class LcaRemoteStreamCodec {
 
     /**
      * Packs a 12-bit voxel position (`0..4095`) and 19-bit block-state ID into a non-zero
-     * 32-bit `dirtyOverlay` entry (`((pos12 + 1) << 19) | (stateId19 & 0x7FFFF)`).
+     * 32-bit `dirtyOverlay` entry ({@code ((pos12 + 1) << 19) | (stateId19 & 0x7FFFF)}).
      */
     public static int packDirtyOverlayEntry(int pos12, int stateId19) {
         if (pos12 < 0 || pos12 > 0xFFF) {
@@ -648,6 +648,17 @@ public final class LcaRemoteStreamCodec {
             List<BatchChunkEntry> entries,
             boolean omitHeightmaps
     ) {
+        return serializeRawChunkBatch(regionX, regionZ, entries, omitHeightmaps, null, null);
+    }
+
+    public static byte[] serializeRawChunkBatch(
+            int regionX,
+            int regionZ,
+            List<BatchChunkEntry> entries,
+            boolean omitHeightmaps,
+            LcaOrderlessDictWireTable dictTableOrNull,
+            LcaOrderlessDictWireTable.KnownSlotBitSet targetKnownSlotsOrNull
+    ) {
         Objects.requireNonNull(entries, "entries");
         ByteArrayOutputStream baos = new ByteArrayOutputStream(entries.size() * 1024);
         try (DataOutputStream out = new DataOutputStream(baos)) {
@@ -656,7 +667,7 @@ public final class LcaRemoteStreamCodec {
             writeVarInt(out, regionZ);
             out.writeByte(entries.size());
             for (BatchChunkEntry entry : entries) {
-                writeEntryTo(out, entry, omitHeightmaps);
+                writeEntryTo(out, entry, omitHeightmaps, dictTableOrNull, targetKnownSlotsOrNull);
             }
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -673,6 +684,27 @@ public final class LcaRemoteStreamCodec {
     ) throws IOException {
         byte[] raw = serializeRawChunkBatch(regionX, regionZ, entries, omitHeightmaps);
         return lcd2Compress ? encodeLcd2BatchFrame(raw) : raw;
+    }
+
+    /**
+     * Zero-re-encode {@code LCAB} batch emitter: optionally applies incremental {@code ODCT}
+     * dictionary substitution (emitting only newly learned slots since the last packet) and wraps
+     * the payload in an O(1) {@code LCD2} passthrough frame ({@code 9 B} header + {@code arraycopy},
+     * zero LZ77 compression) when {@code wrapLcd2Passthrough} is true ({@code goldleaf-ADR-005},
+     * {@code leafanvil-ADR-003}).
+     */
+    public static byte[] encodeChunkBatchDirect(
+            int regionX,
+            int regionZ,
+            List<BatchChunkEntry> entries,
+            boolean omitHeightmaps,
+            boolean wrapLcd2Passthrough,
+            LcaOrderlessDictWireTable dictTableOrNull,
+            LcaOrderlessDictWireTable.KnownSlotBitSet targetKnownSlotsOrNull
+    ) throws IOException {
+        byte[] raw = serializeRawChunkBatch(
+                regionX, regionZ, entries, omitHeightmaps, dictTableOrNull, targetKnownSlotsOrNull);
+        return wrapLcd2Passthrough ? encodeLcd2PassthroughFrame(raw) : raw;
     }
 
     public static StreamChunkBatchPayload decodeChunkBatch(
@@ -809,64 +841,106 @@ public final class LcaRemoteStreamCodec {
         throw new IOException("Unsupported .lca stream frame magic: 0x" + Integer.toHexString(magic));
     }
 
+    private static boolean hasNonUniformSectionSlice(List<SectionWireSlice> sections) {
+        for (int i = 0; i < sections.size(); i++) {
+            SectionWireSlice s = sections.get(i);
+            if (s != null && !s.isUniform()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static void writeEntryTo(
             DataOutputStream out,
             BatchChunkEntry entry,
             boolean omitHeightmaps
+    ) throws IOException {
+        writeEntryTo(out, entry, omitHeightmaps, null, null);
+    }
+
+    public static void writeEntryTo(
+            DataOutputStream out,
+            BatchChunkEntry entry,
+            boolean omitHeightmaps,
+            LcaOrderlessDictWireTable dictTableOrNull,
+            LcaOrderlessDictWireTable.KnownSlotBitSet targetKnownSlotsOrNull
     ) throws IOException {
         if (entry instanceof EntryCleanAck ack) {
             out.writeShort(ack.toWord16());
             return;
         }
         if (entry instanceof EntryPatchDelta patch) {
+            boolean useOrderless = dictTableOrNull != null
+                    && targetKnownSlotsOrNull != null
+                    && hasNonUniformSectionSlice(patch.modifiedSections());
+            int flags4 = useOrderless ? 0x2 : 0x0;
             short headerWord = packEntryHeaderWord16(
                     ENTRY_PATCH_DELTA,
-                    patch.modifiedSections().size() & 0xF,
+                    flags4,
                     patch.localChunkIndex10()
             );
             out.writeShort(headerWord);
             writeVarLong(out, patch.newLastUpdateTick());
             out.writeLong(patch.newSecDedSyndrome64());
             out.writeInt(patch.dirtySectionBitmask32());
-            for (SectionWireSlice slice : patch.modifiedSections()) {
-                writeSectionWireSlice(out, slice);
+            if (useOrderless) {
+                byte[] dictEncoded = dictTableOrNull.encodeSectionWireSlicesWithDict(
+                        patch.modifiedSections(), targetKnownSlotsOrNull);
+                writeVarInt(out, dictEncoded.length);
+                out.write(dictEncoded);
+            } else {
+                for (SectionWireSlice slice : patch.modifiedSections()) {
+                    writeSectionWireSlice(out, slice);
+                }
             }
             return;
         }
         if (entry instanceof EntryFullChunk full) {
             int sectionCount = full.sections().size();
-            int overlayMask = 0;
-            for (int i = 0; i < sectionCount; i++) {
-                if (full.sections().get(i).dirtyOverlayEntries().length > 0) {
-                    overlayMask |= (1 << i);
-                }
-            }
             boolean hasHm = !omitHeightmaps && full.heightmapDeltaBytes().length > 0;
-            int flags4 = (hasHm ? 0x1 : 0x0) | ((overlayMask != 0) ? 0x2 : 0x0);
+            boolean useOrderless = dictTableOrNull != null
+                    && targetKnownSlotsOrNull != null
+                    && hasNonUniformSectionSlice(full.sections());
+            // Wire parity with LcaWireStreamProtocol: flags4 bit 2 (1<<12) = HAS_HEIGHTMAPS,
+            // bit 1 (1<<11) = ORDERLESS_DICT_SECTIONS.
+            int flags4 = (hasHm ? 0x4 : 0x0) | (useOrderless ? 0x2 : 0x0);
             short headerWord = packEntryHeaderWord16(ENTRY_FULL_CHUNK, flags4, full.localChunkIndex10());
             out.writeShort(headerWord);
             writeVarInt(out, full.chunkX());
             writeVarInt(out, full.chunkZ());
             writeVarLong(out, full.lastUpdateTick());
             out.writeLong(full.secDedSyndrome64());
-            out.writeByte(sectionCount);
-            for (SectionWireSlice slice : full.sections()) {
-                out.writeShort(slice.directoryWord16());
-            }
-            out.writeInt(overlayMask);
-            for (SectionWireSlice slice : full.sections()) {
-                if (!slice.isUniform()) {
-                    byte[] base = slice.baseFrameSlice();
-                    int len = slice.directoryWord16() & 0x7FFF;
-                    out.write(base, 0, len);
+            if (useOrderless) {
+                byte[] dictEncoded = dictTableOrNull.encodeSectionWireSlicesWithDict(
+                        full.sections(), targetKnownSlotsOrNull);
+                writeVarInt(out, dictEncoded.length);
+                out.write(dictEncoded);
+            } else {
+                int overlayMask = 0;
+                for (int i = 0; i < sectionCount; i++) {
+                    if (full.sections().get(i).dirtyOverlayEntries().length > 0) {
+                        overlayMask |= (1 << i);
+                    }
                 }
-            }
-            for (int i = 0; i < sectionCount; i++) {
-                if ((overlayMask & (1 << i)) != 0) {
-                    int[] entries = full.sections().get(i).dirtyOverlayEntries();
-                    writeVarInt(out, entries.length);
-                    for (int packed : entries) {
-                        out.writeInt(packed);
+                out.writeByte(sectionCount);
+                for (SectionWireSlice slice : full.sections()) {
+                    out.writeShort(slice.directoryWord16());
+                }
+                out.writeInt(overlayMask);
+                for (int i = 0; i < sectionCount; i++) {
+                    SectionWireSlice slice = full.sections().get(i);
+                    if (!slice.isUniform()) {
+                        byte[] base = slice.baseFrameSlice();
+                        int len = slice.directoryWord16() & 0x7FFF;
+                        out.write(base, 0, len);
+                    }
+                    if ((overlayMask & (1 << i)) != 0) {
+                        int[] entries = slice.dirtyOverlayEntries();
+                        writeVarInt(out, entries.length);
+                        for (int packed : entries) {
+                            out.writeInt(packed);
+                        }
                     }
                 }
             }
@@ -926,24 +1000,20 @@ public final class LcaRemoteStreamCodec {
                     baseSlice = new byte[bodyLen];
                     in.readFully(baseSlice);
                 }
-                sections.add(new SectionWireSlice(i, dirWord, baseSlice, new int[0]));
-            }
-            if (overlayMask != 0) {
-                for (int i = 0; i < sectionCount; i++) {
-                    if ((overlayMask & (1 << i)) != 0) {
-                        int count = readVarInt(in);
-                        int[] overlay = new int[count];
-                        for (int j = 0; j < count; j++) {
-                            overlay[j] = in.readInt();
-                        }
-                        SectionWireSlice prev = sections.get(i);
-                        sections.set(i, new SectionWireSlice(
-                                i, prev.directoryWord16(), prev.baseFrameSlice(), overlay));
+                int[] overlay;
+                if ((overlayMask & (1 << i)) != 0) {
+                    int count = readVarInt(in);
+                    overlay = new int[count];
+                    for (int j = 0; j < count; j++) {
+                        overlay[j] = in.readInt();
                     }
+                } else {
+                    overlay = new int[0];
                 }
+                sections.add(new SectionWireSlice(i, dirWord, baseSlice, overlay));
             }
             byte[] hmBytes = new byte[0];
-            if ((flags4 & 0x1) != 0) {
+            if ((flags4 & 0x4) != 0) {
                 int hmLen = readVarInt(in);
                 hmBytes = new byte[hmLen];
                 in.readFully(hmBytes);
@@ -999,7 +1069,7 @@ public final class LcaRemoteStreamCodec {
         int i = 0;
         int len = slabBytes.length;
         for (; i + 8 <= len; i += 8) {
-            long word = ((long) (slabBytes[i] & 0xFF))
+            long word = (slabBytes[i] & 0xFF)
                     | ((long) (slabBytes[i + 1] & 0xFF) << 8)
                     | ((long) (slabBytes[i + 2] & 0xFF) << 16)
                     | ((long) (slabBytes[i + 3] & 0xFF) << 24)
@@ -1007,7 +1077,7 @@ public final class LcaRemoteStreamCodec {
                     | ((long) (slabBytes[i + 5] & 0xFF) << 40)
                     | ((long) (slabBytes[i + 6] & 0xFF) << 48)
                     | ((long) (slabBytes[i + 7] & 0xFF) << 56);
-            accA = splitMix64(accA ^ word ^ ((long) i * 0xBF58476D1CE4E5B9L));
+            accA = splitMix64(accA ^ word ^ (i * 0xBF58476D1CE4E5B9L));
             accB = Long.rotateLeft(accB ^ word, 17) + 0x94D049BB133111EBL;
             bitPosXor ^= Long.rotateLeft(word, i & 63);
         }
@@ -1016,7 +1086,7 @@ public final class LcaRemoteStreamCodec {
             for (int shift = 0; i < len; i++, shift += 8) {
                 tail |= ((long) (slabBytes[i] & 0xFF)) << shift;
             }
-            accA = splitMix64(accA ^ tail ^ ((long) len * 0x9E3779B97F4A7C15L));
+            accA = splitMix64(accA ^ tail ^ (len * 0x9E3779B97F4A7C15L));
             accB = Long.rotateLeft(accB ^ tail, 23) ^ 0xD6E8FEB86659FD93L;
             bitPosXor ^= Long.rotateLeft(tail, len & 63);
         }
@@ -1459,7 +1529,9 @@ public final class LcaRemoteStreamCodec {
                             mLen++;
                         }
                         int mode = dist4 <= 256 ? 0 : 1;
-                        int cost = (mode == 0 ? 1 : 2) + (mLen >= (mode == 0 ? 10 : 11) ? 1 : 0);
+                        int baseCost = mode == 0 ? 1 : 2;
+                        int extraLenThreshold = mode == 0 ? 10 : 11;
+                        int cost = baseCost + (mLen >= extraLenThreshold ? 1 : 0);
                         int sav = mLen - cost;
                         if (sav > bestSavings) {
                             bestSavings = sav;

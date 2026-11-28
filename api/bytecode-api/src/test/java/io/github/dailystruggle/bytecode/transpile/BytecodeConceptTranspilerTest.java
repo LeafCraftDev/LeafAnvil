@@ -36,6 +36,7 @@ import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -1030,6 +1031,90 @@ class BytecodeConceptTranspilerTest {
                 int expectedNibble = SampleBlendedMultiOctaveNoise.sampleBlended(ox + lx, oy + ly, oz + lz) > 0.0 ? 1 : 0;
                 assertEquals(expectedNibble, actualNibble, "LCA nibble mismatch at vIdx=" + vIdx);
             }
+
+            // 2d. DENSITY_VOLUME_BATCH_F32 in both Java and OpenCL (MC 26.3 DensityVolume layout)
+            TranspiledArtifact dvJava = javaEmitter.emit(
+                    sharedModule, EmitOptions.of(GpuExactArithmeticMode.NATIVE_FP64, BatchLayout.DENSITY_VOLUME_BATCH_F32));
+            Class<?> dvCls = compileAndLoadGeneratedJava(tempDir.resolve("dv_fp64"), dvJava.sourceCode());
+            int[] dvOrigins = {ox, oy, oz, ox + 16, oy, oz + 16};
+            float[] dvOut = new float[2 * 5 * 3 * 5];
+            dvCls.getMethod(
+                            "evaluate_density_volume_batch_f32",
+                            float[].class, int[].class, int.class,
+                            int.class, int.class, int.class,
+                            int.class, int.class, int.class)
+                    .invoke(null, dvOut, dvOrigins, 2, 5, 3, 5, 4, 8, 4);
+            for (int b = 0; b < 2; b++) {
+                int bx0 = dvOrigins[b * 3];
+                int by0 = dvOrigins[b * 3 + 1];
+                int bz0 = dvOrigins[b * 3 + 2];
+                for (int lz = 0; lz < 5; lz++) {
+                    for (int lx = 0; lx < 5; lx++) {
+                        for (int ly = 0; ly < 3; ly++) {
+                            int idx = b * (5 * 3 * 5) + (lx + lz * 5) * 3 + ly;
+                            float expected = (float) SampleBlendedMultiOctaveNoise.sampleBlended(
+                                    bx0 + lx * 4, by0 + ly * 8, bz0 + lz * 4);
+                            assertEquals(expected, dvOut[idx], 0.0f, "DENSITY_VOLUME_BATCH_F32 drift at b=" + b + " idx=" + idx);
+                        }
+                    }
+                }
+            }
+
+            OpenClBackendEmitter dvOpenClEmitter = new OpenClBackendEmitter();
+            OpenClBackendEmitter.DensityVolumeProgram progFp64 = dvOpenClEmitter.emitDensityVolumeBatchProgram(
+                    sharedModule, EmitOptions.gpuFp64());
+            OpenClBackendEmitter.DensityVolumeProgram progFp64Repeat = dvOpenClEmitter.emitDensityVolumeBatchProgram(
+                    sharedModule, EmitOptions.gpuFp64());
+            OpenClBackendEmitter.DensityVolumeProgram progFp32 = dvOpenClEmitter.emitDensityVolumeBatchProgram(
+                    sharedModule, EmitOptions.gpuFp32());
+            assertEquals("evaluate_density_volume_batch_f32", progFp64.kernelName());
+            assertTrue(progFp64.sourceCode().contains("__kernel void evaluate_density_volume_batch_f32("));
+            assertTrue(progFp64.sourceCode().contains("gl_lut_spill"));
+            assertEquals(64, progFp64.kernelDigestSha256().length());
+            assertEquals(progFp64.kernelDigestSha256(), progFp64Repeat.kernelDigestSha256(), "Digest must be deterministic");
+            assertFalse(progFp64.kernelDigestSha256().equals(progFp32.kernelDigestSha256()), "FP64 vs FP32 digest must differ");
+
+            // 2e. SECTION_PALETTE_FILL_U2 in both Java and OpenCL (compact 2-bit DMA writeback layout)
+            TranspiledArtifact fillJava = javaEmitter.emit(
+                    sharedModule, EmitOptions.of(GpuExactArithmeticMode.NATIVE_FP64, BatchLayout.SECTION_PALETTE_FILL_U2));
+            Class<?> fillCls = compileAndLoadGeneratedJava(tempDir.resolve("fill_u2_fp64"), fillJava.sourceCode());
+            int[] fillOrigins = {ox, -64, oz};
+            int[] fillWords = new int[2 * 256];
+            short[] fillMeta = new short[2 * 4];
+            fillCls.getMethod(
+                            "fill_section_palette_batch_u2",
+                            int[].class, short[].class, int[].class,
+                            int.class, int.class, int.class, int.class)
+                    .invoke(null, fillWords, fillMeta, fillOrigins, 1, 2, -40, -54);
+            for (int s = 0; s < 2; s++) {
+                int expNonEmpty = 0;
+                int expFluid = 0;
+                int expMask = 0;
+                for (int ly = 0; ly < 16; ly++) {
+                    int by = -64 + (s << 4) + ly;
+                    for (int lz = 0; lz < 16; lz++) {
+                        int word = fillWords[(s << 8) + (ly << 4) + lz];
+                        for (int lx = 0; lx < 16; lx++) {
+                            float d = (float) SampleBlendedMultiOctaveNoise.sampleBlended(ox + lx, by, oz + lz);
+                            int expectedCode = d > 0.0f ? 1 : (by < -54 ? 3 : (by < -40 ? 2 : 0));
+                            int actualCode = (word >>> (lx << 1)) & 0x3;
+                            assertEquals(expectedCode, actualCode, "SECTION_PALETTE_FILL_U2 code drift");
+                            if (expectedCode != 0) expNonEmpty++;
+                            if (expectedCode >= 2) expFluid++;
+                            expMask |= (1 << expectedCode);
+                        }
+                    }
+                }
+                assertEquals(expNonEmpty, fillMeta[s * 4] & 0xFFFF);
+                assertEquals(expFluid, fillMeta[s * 4 + 1] & 0xFFFF);
+                assertEquals(expMask, fillMeta[s * 4 + 2] & 0xFFFF);
+            }
+            OpenClBackendEmitter.DensityVolumeProgram fillProg = dvOpenClEmitter.emitSectionPaletteFillProgram(
+                    sharedModule, EmitOptions.gpuFp32());
+            assertEquals("fill_section_palette_batch_u2", fillProg.kernelName());
+            assertTrue(fillProg.sourceCode().contains("__kernel void fill_section_palette_batch_u2("));
+            assertTrue(fillProg.sourceCode().contains("out_section_meta[wg_id]"));
+            assertFalse(fillProg.kernelDigestSha256().equals(progFp32.kernelDigestSha256()));
         } finally {
             deleteRecursively(tempDir);
         }
@@ -1097,6 +1182,13 @@ class BytecodeConceptTranspilerTest {
                 .append("#define fmax(x, y) _Generic((x), float: fmaxf, double: fmax)(x, y)\n")
                 .append("#define rint(x) _Generic((x), float: rintf, double: rint)(x)\n")
                 .append("#define fma(x, y, z) _Generic((x), float: fmaf, double: fma)(x, y, z)\n")
+                .append("#define mad(x, y, z) _Generic((x), float: fmaf, double: fma)(x, y, z)\n")
+                .append("#define native_sin(x) sinf(x)\n")
+                .append("#define native_cos(x) cosf(x)\n")
+                .append("#define native_tan(x) tanf(x)\n")
+                .append("#define native_sqrt(x) sqrtf(x)\n")
+                .append("#define native_exp(x) expf(x)\n")
+                .append("#define native_log(x) logf(x)\n")
                 .append("#define inline static inline\n\n")
                 .append(sanitizedCl)
                 .append("\nint main(void) {\n");
@@ -2039,6 +2131,13 @@ class BytecodeConceptTranspilerTest {
                 .append("#define fmax(x, y) _Generic((x), float: fmaxf, double: fmax)(x, y)\n")
                 .append("#define rint(x) _Generic((x), float: rintf, double: rint)(x)\n")
                 .append("#define fma(x, y, z) _Generic((x), float: fmaf, double: fma)(x, y, z)\n")
+                .append("#define mad(x, y, z) _Generic((x), float: fmaf, double: fma)(x, y, z)\n")
+                .append("#define native_sin(x) sinf(x)\n")
+                .append("#define native_cos(x) cosf(x)\n")
+                .append("#define native_tan(x) tanf(x)\n")
+                .append("#define native_sqrt(x) sqrtf(x)\n")
+                .append("#define native_exp(x) expf(x)\n")
+                .append("#define native_log(x) logf(x)\n")
                 .append("#define inline static inline\n\n")
                 .append(sanitizedCl)
                 .append("\nint main(void) {\n");
@@ -2628,5 +2727,554 @@ class BytecodeConceptTranspilerTest {
             float expected = (float) ((Number) ConceptIrEvaluator.evaluateEntry(nonContigMod, 19, y, 11)).doubleValue();
             assertEquals(expected, ncOut[offset + i], 0.0f, "Non-contiguous ColumnY mismatch at i=" + i + " y=" + y);
         }
+    }
+
+    @Test
+    @DisplayName("Emits SECTION_PALETTE_FILL_U2 kernel with coarse __local trilinear interpolation and compiles on GPU")
+    void emitsInterpolatedSectionPaletteFillKernelWithCoarseLocalTrilinear() throws Exception {
+        org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalArgumentException.class,
+                () -> new OpenClBackendEmitter.CoarseInterpSpec(3, 8, List.of("gl_coarse_ch0")));
+        org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalArgumentException.class,
+                () -> new OpenClBackendEmitter.CoarseInterpSpec(4, 8, List.of()));
+
+        List<BytecodeConceptIr.ConceptParam> xyzParams = List.of(
+                new BytecodeConceptIr.ConceptParam("x", BytecodeConceptIr.ConceptType.I32, 0),
+                new BytecodeConceptIr.ConceptParam("y", BytecodeConceptIr.ConceptType.I32, 1),
+                new BytecodeConceptIr.ConceptParam("z", BytecodeConceptIr.ConceptType.I32, 2));
+
+        BytecodeConceptIr.ConceptFunction coarse0 = new BytecodeConceptIr.ConceptFunction(
+                "test/CoarseInterp",
+                "gl_coarse_ch0",
+                "(III)F",
+                xyzParams,
+                BytecodeConceptIr.ConceptType.F32,
+                java.util.Map.of(),
+                List.of(new BytecodeConceptIr.ConceptStmt.Return(
+                        new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                                BytecodeConceptIr.BinaryOperator.SUB,
+                                new BytecodeConceptIr.ConceptExpr.FloatConst(64.0f),
+                                new BytecodeConceptIr.ConceptExpr.Cast(
+                                        BytecodeConceptIr.ConceptType.F32,
+                                        new BytecodeConceptIr.ConceptExpr.Var("y", BytecodeConceptIr.ConceptType.I32)),
+                                BytecodeConceptIr.ConceptType.F32))),
+                true);
+
+        BytecodeConceptIr.ConceptFunction coarse1 = new BytecodeConceptIr.ConceptFunction(
+                "test/CoarseInterp",
+                "gl_coarse_ch1",
+                "(III)F",
+                xyzParams,
+                BytecodeConceptIr.ConceptType.F32,
+                java.util.Map.of(),
+                List.of(new BytecodeConceptIr.ConceptStmt.Return(
+                        new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                                BytecodeConceptIr.BinaryOperator.MUL,
+                                new BytecodeConceptIr.ConceptExpr.Cast(
+                                        BytecodeConceptIr.ConceptType.F32,
+                                        new BytecodeConceptIr.ConceptExpr.Var("x", BytecodeConceptIr.ConceptType.I32)),
+                                new BytecodeConceptIr.ConceptExpr.FloatConst(0.05f),
+                                BytecodeConceptIr.ConceptType.F32))),
+                true);
+
+        BytecodeConceptIr.ConceptFunction entry = new BytecodeConceptIr.ConceptFunction(
+                "test/CoarseInterp",
+                "sample",
+                "(IIIFF)F",
+                List.of(
+                        new BytecodeConceptIr.ConceptParam("x", BytecodeConceptIr.ConceptType.I32, 0),
+                        new BytecodeConceptIr.ConceptParam("y", BytecodeConceptIr.ConceptType.I32, 1),
+                        new BytecodeConceptIr.ConceptParam("z", BytecodeConceptIr.ConceptType.I32, 2),
+                        new BytecodeConceptIr.ConceptParam("gl_ch_0", BytecodeConceptIr.ConceptType.F32, 3),
+                        new BytecodeConceptIr.ConceptParam("gl_ch_1", BytecodeConceptIr.ConceptType.F32, 4)),
+                BytecodeConceptIr.ConceptType.F32,
+                java.util.Map.of(),
+                List.of(new BytecodeConceptIr.ConceptStmt.Return(
+                        new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                                BytecodeConceptIr.BinaryOperator.ADD,
+                                new BytecodeConceptIr.ConceptExpr.Var("gl_ch_0", BytecodeConceptIr.ConceptType.F32),
+                                new BytecodeConceptIr.ConceptExpr.Var("gl_ch_1", BytecodeConceptIr.ConceptType.F32),
+                                BytecodeConceptIr.ConceptType.F32))),
+                true);
+
+        ConceptModule mod = new ConceptModule(
+                "CoarseInterpSectionFill",
+                List.of(),
+                List.of(coarse0, coarse1),
+                entry,
+                null,
+                null,
+                List.of());
+        EmitOptions fillOpts = EmitOptions.of(GpuExactArithmeticMode.DOWNCAST_FP32, BatchLayout.SECTION_PALETTE_FILL_U2);
+        ConceptModule optMod = ConceptOptimizerPass.optimize(mod, fillOpts);
+        OpenClBackendEmitter.CoarseInterpSpec spec =
+                new OpenClBackendEmitter.CoarseInterpSpec(4, 8, List.of("gl_coarse_ch0", "gl_coarse_ch1"));
+        OpenClBackendEmitter.DensityVolumeProgram program = new OpenClBackendEmitter()
+                .emitInterpolatedSectionPaletteFillProgram(optMod, fillOpts, spec);
+
+        assertEquals("fill_section_palette_batch_u2", program.kernelName());
+        assertTrue(program.sourceCode().contains("__local float coarse_vals[150];"), "Expected 2*75 coarse __local buffer");
+        assertTrue(program.sourceCode().contains("gl_coarse_ch0(gx, gy, gz"), "Expected coarse channel 0 call");
+        assertTrue(program.sourceCode().contains("gl_coarse_ch1(gx, gy, gz"), "Expected coarse channel 1 call");
+        assertFalse(program.sourceCode().contains("const float gl_ch_0,"), "Coarse channels must not leak into kernel args");
+        assertTrue(program.sourceCode().contains("const float gl_ch_0 = cx0_0 + step_0 * (float)sub_y;"));
+
+        if (isRealOpenClGpuAvailable()) {
+            Path tempDir = Files.createTempDirectory("coarse-interp-cl-test");
+            try {
+                verifyOpenClCompilesOnGpu(tempDir.resolve("coarse_interp.cl"), program.sourceCode());
+            } finally {
+                deleteRecursively(tempDir);
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("Emits fused 6-channel biome climate OpenCL kernel with LUT deduplication and INT64_Q32_FP32")
+    void emitsFused6ChannelBiomeClimateBatchKernelAndDeduplicatesSharedLuts() throws Exception {
+        List<BytecodeConceptIr.ConceptParam> xyzParams = List.of(
+                new BytecodeConceptIr.ConceptParam("x", BytecodeConceptIr.ConceptType.I32, 0),
+                new BytecodeConceptIr.ConceptParam("y", BytecodeConceptIr.ConceptType.I32, 1),
+                new BytecodeConceptIr.ConceptParam("z", BytecodeConceptIr.ConceptType.I32, 2));
+        List<Number> sharedPerm = new java.util.ArrayList<>(16);
+        for (int i = 0; i < 16; i++) {
+            sharedPerm.add((i * 7 + 3) & 15);
+        }
+        List<ConceptModule> climateModules = new java.util.ArrayList<>(6);
+        for (int c = 0; c < 6; c++) {
+            BytecodeConceptIr.ConceptLut sharedLut = new BytecodeConceptIr.ConceptLut(
+                    "test/BiomeCh" + c,
+                    "PERM",
+                    "shared_perm",
+                    BytecodeConceptIr.ConceptType.I32,
+                    sharedPerm);
+            BytecodeConceptIr.ConceptExpr lutLoad = new BytecodeConceptIr.ConceptExpr.LutLoad(
+                    "shared_perm",
+                    new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                            BytecodeConceptIr.BinaryOperator.BIT_AND,
+                            new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                                    BytecodeConceptIr.BinaryOperator.ADD,
+                                    new BytecodeConceptIr.ConceptExpr.Var("x", BytecodeConceptIr.ConceptType.I32),
+                                    new BytecodeConceptIr.ConceptExpr.Var("z", BytecodeConceptIr.ConceptType.I32),
+                                    BytecodeConceptIr.ConceptType.I32),
+                            new BytecodeConceptIr.ConceptExpr.IntConst(15),
+                            BytecodeConceptIr.ConceptType.I32),
+                    BytecodeConceptIr.ConceptType.I32);
+            BytecodeConceptIr.ConceptFunction entry = new BytecodeConceptIr.ConceptFunction(
+                    "test/BiomeCh" + c,
+                    "sample",
+                    "(III)F",
+                    xyzParams,
+                    BytecodeConceptIr.ConceptType.F32,
+                    java.util.Map.of(),
+                    List.of(new BytecodeConceptIr.ConceptStmt.Return(
+                            new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                                    BytecodeConceptIr.BinaryOperator.ADD,
+                                    new BytecodeConceptIr.ConceptExpr.Cast(BytecodeConceptIr.ConceptType.F32, lutLoad),
+                                    new BytecodeConceptIr.ConceptExpr.FloatConst((c + 1) * 0.25f),
+                                    BytecodeConceptIr.ConceptType.F32))),
+                    true);
+            climateModules.add(new ConceptModule(
+                    "climate_ch_" + c,
+                    List.of(sharedLut),
+                    List.of(),
+                    entry,
+                    null,
+                    null,
+                    List.of()));
+        }
+
+        EmitOptions opts = EmitOptions.of(
+                GpuExactArithmeticMode.INT64_Q32_FP32, BatchLayout.DENSITY_VOLUME_BATCH_F32);
+        OpenClBackendEmitter.DensityVolumeProgram program =
+                new OpenClBackendEmitter().emitFusedBiomeClimateBatchProgram(climateModules, opts);
+
+        assertEquals("eval_biome_climate6_batch", program.kernelName());
+        assertTrue(program.sourceCode().contains("__kernel void eval_biome_climate6_batch("));
+        assertTrue(program.sourceCode().contains("#pragma OPENCL FP_CONTRACT OFF"));
+        assertFalse(program.sourceCode().contains("cl_khr_fp64"));
+        for (int c = 0; c < 6; c++) {
+            assertTrue(program.sourceCode().contains("out_values[out_base + " + c + "] = "));
+        }
+        assertTrue(
+                program.deduplicatedLutCount() >= 5,
+                "Expected shared LUT to be deduplicated across channels, got " + program.deduplicatedLutCount());
+
+        if (isRealOpenClGpuAvailable()) {
+            Path tempDir = Files.createTempDirectory("fused-biome6-cl-test");
+            try {
+                verifyOpenClCompilesOnGpu(tempDir.resolve("fused_biome6.cl"), program.sourceCode());
+            } finally {
+                deleteRecursively(tempDir);
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("Array-backed OpenCL and worldgen interpolation records use array content semantics for equals, hashCode, and toString")
+    void arrayBackedRecordsUseContentSemanticsForEqualsHashCodeAndToString() {
+        OpenClBackendEmitter.DensityVolumeProgram dv1 = new OpenClBackendEmitter.DensityVolumeProgram(
+                "eval_k", "__kernel void eval_k() {}", "deadbeef", new int[] {1, 2, 3}, 12, 1, 0);
+        OpenClBackendEmitter.DensityVolumeProgram dv2 = new OpenClBackendEmitter.DensityVolumeProgram(
+                "eval_k", "__kernel void eval_k() {}", "deadbeef", new int[] {1, 2, 3}, 12, 1, 0);
+        OpenClBackendEmitter.DensityVolumeProgram dvDiff = new OpenClBackendEmitter.DensityVolumeProgram(
+                "eval_k", "__kernel void eval_k() {}", "deadbeef", new int[] {1, 2, 4}, 12, 1, 0);
+        assertEquals(dv1, dv2);
+        assertEquals(dv1.hashCode(), dv2.hashCode());
+        assertNotEquals(dv1, dvDiff);
+        assertTrue(dv1.toString().contains("[1, 2, 3]"), "toString must render array contents: " + dv1);
+
+        OpenClBackendEmitter.MultiModuleSectionProgram mm1 = new OpenClBackendEmitter.MultiModuleSectionProgram(
+                "primary", "aux", List.of("aux0()"), new int[] {7, 8}, 8, 1, 2);
+        OpenClBackendEmitter.MultiModuleSectionProgram mm2 = new OpenClBackendEmitter.MultiModuleSectionProgram(
+                "primary", "aux", List.of("aux0()"), new int[] {7, 8}, 8, 1, 2);
+        OpenClBackendEmitter.MultiModuleSectionProgram mmDiff = new OpenClBackendEmitter.MultiModuleSectionProgram(
+                "primary", "aux", List.of("aux0()"), new int[] {7, 9}, 8, 1, 2);
+        assertEquals(mm1, mm2);
+        assertEquals(mm1.hashCode(), mm2.hashCode());
+        assertNotEquals(mm1, mmDiff);
+        assertTrue(mm1.toString().contains("[7, 8]"), "toString must render array contents: " + mm1);
+
+        LiftedWorldgenCapabilityTables.DensityFieldEvaluator evalA = (x, y, z) -> 1.0f;
+        LiftedWorldgenCapabilityTables.DensityFieldEvaluator evalB = (x, y, z) -> 2.0f;
+        LiftedWorldgenCapabilityTables.InterpolatedCombiner combiner = (vals, x, y, z) -> vals[0];
+        LiftedWorldgenCapabilityTables.InterpolatedDensityPlan plan1 =
+                new LiftedWorldgenCapabilityTables.InterpolatedDensityPlan(
+                        new LiftedWorldgenCapabilityTables.DensityFieldEvaluator[] {evalA},
+                        combiner,
+                        "c0",
+                        "c0");
+        LiftedWorldgenCapabilityTables.InterpolatedDensityPlan plan2 =
+                new LiftedWorldgenCapabilityTables.InterpolatedDensityPlan(
+                        new LiftedWorldgenCapabilityTables.DensityFieldEvaluator[] {evalA},
+                        combiner,
+                        "c0",
+                        "c0");
+        LiftedWorldgenCapabilityTables.InterpolatedDensityPlan planDiff =
+                new LiftedWorldgenCapabilityTables.InterpolatedDensityPlan(
+                        new LiftedWorldgenCapabilityTables.DensityFieldEvaluator[] {evalB},
+                        combiner,
+                        "c0",
+                        "c0");
+        assertEquals(plan1, plan2);
+        assertEquals(plan1.hashCode(), plan2.hashCode());
+        assertNotEquals(plan1, planDiff);
+        assertTrue(plan1.toString().contains("[" + evalA + "]"), "toString must render array contents: " + plan1);
+
+        ConceptFunction fnA = new ConceptFunction(
+                "test/ModA", "sample", "()F", List.of(), BytecodeConceptIr.ConceptType.F32,
+                java.util.Map.of(), List.of(new BytecodeConceptIr.ConceptStmt.Return(
+                        new BytecodeConceptIr.ConceptExpr.FloatConst(1.0f))), true);
+        ConceptFunction fnB = new ConceptFunction(
+                "test/ModB", "sample", "()F", List.of(), BytecodeConceptIr.ConceptType.F32,
+                java.util.Map.of(), List.of(new BytecodeConceptIr.ConceptStmt.Return(
+                        new BytecodeConceptIr.ConceptExpr.FloatConst(2.0f))), true);
+        ConceptModule modA = new ConceptModule("modA", List.of(), List.of(), fnA, null, null, List.of());
+        ConceptModule modB = new ConceptModule("modB", List.of(), List.of(), fnB, null, null, List.of());
+        LiftedWorldgenCapabilityTables.InterpolatedDensityGpuPlan gpu1 =
+                new LiftedWorldgenCapabilityTables.InterpolatedDensityGpuPlan(
+                        new ConceptModule[] {modA}, "c0", "c0");
+        LiftedWorldgenCapabilityTables.InterpolatedDensityGpuPlan gpu2 =
+                new LiftedWorldgenCapabilityTables.InterpolatedDensityGpuPlan(
+                        new ConceptModule[] {modA}, "c0", "c0");
+        LiftedWorldgenCapabilityTables.InterpolatedDensityGpuPlan gpuDiff =
+                new LiftedWorldgenCapabilityTables.InterpolatedDensityGpuPlan(
+                        new ConceptModule[] {modB}, "c0", "c0");
+        assertEquals(gpu1, gpu2);
+        assertEquals(gpu1.hashCode(), gpu2.hashCode());
+        assertNotEquals(gpu1, gpuDiff);
+        assertTrue(gpu1.toString().contains("[" + modA + "]"), "toString must render array contents: " + gpu1);
+
+        OpenClBackendEmitter.MultiEntryHelpersProgram me1 = new OpenClBackendEmitter.MultiEntryHelpersProgram(
+                "helpers", List.of("e0()"), new int[] {3, 4}, 16, 1, 2);
+        OpenClBackendEmitter.MultiEntryHelpersProgram me2 = new OpenClBackendEmitter.MultiEntryHelpersProgram(
+                "helpers", List.of("e0()"), new int[] {3, 4}, 16, 1, 2);
+        OpenClBackendEmitter.MultiEntryHelpersProgram meDiff = new OpenClBackendEmitter.MultiEntryHelpersProgram(
+                "helpers", List.of("e0()"), new int[] {3, 5}, 16, 1, 2);
+        assertEquals(me1, me2);
+        assertEquals(me1.hashCode(), me2.hashCode());
+        assertNotEquals(me1, meDiff);
+        assertTrue(me1.toString().contains("[3, 4]"), "toString must render array contents: " + me1);
+    }
+
+    @Test
+    @DisplayName("emitMultiEntryHelpers emits one shared device helper across all entries and compiles cleanly on GPU")
+    void emitMultiEntryHelpersSharesSingleHelperAndCompilesOnGpu() throws Exception {
+        String owner = "test/SharedMultiEntry";
+        List<Number> permData = new java.util.ArrayList<>(512);
+        for (int i = 0; i < 512; i++) {
+            permData.add(i & 0xFF);
+        }
+        BytecodeConceptIr.ConceptLut lut = new BytecodeConceptIr.ConceptLut(
+                owner, "gl_perlin_padj_all", "gl_perlin_padj_all", BytecodeConceptIr.ConceptType.I32, permData);
+
+        BytecodeConceptIr.ConceptFunction sharedHelper = new BytecodeConceptIr.ConceptFunction(
+                owner,
+                "gl_perlin_3d",
+                "(IIII)F",
+                List.of(
+                        new BytecodeConceptIr.ConceptParam("off", BytecodeConceptIr.ConceptType.I32, 0),
+                        new BytecodeConceptIr.ConceptParam("x", BytecodeConceptIr.ConceptType.I32, 1),
+                        new BytecodeConceptIr.ConceptParam("y", BytecodeConceptIr.ConceptType.I32, 2),
+                        new BytecodeConceptIr.ConceptParam("z", BytecodeConceptIr.ConceptType.I32, 3)),
+                BytecodeConceptIr.ConceptType.F32,
+                java.util.Map.of(),
+                List.of(new BytecodeConceptIr.ConceptStmt.Return(
+                        new BytecodeConceptIr.ConceptExpr.Cast(
+                                BytecodeConceptIr.ConceptType.F32,
+                                new BytecodeConceptIr.ConceptExpr.LutLoad(
+                                        "gl_perlin_padj_all",
+                                        new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                                                BytecodeConceptIr.BinaryOperator.ADD,
+                                                new BytecodeConceptIr.ConceptExpr.Var("off", BytecodeConceptIr.ConceptType.I32),
+                                                new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                                                        BytecodeConceptIr.BinaryOperator.BIT_AND,
+                                                        new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                                                                BytecodeConceptIr.BinaryOperator.ADD,
+                                                                new BytecodeConceptIr.ConceptExpr.Var("x", BytecodeConceptIr.ConceptType.I32),
+                                                                new BytecodeConceptIr.ConceptExpr.Var("z", BytecodeConceptIr.ConceptType.I32),
+                                                                BytecodeConceptIr.ConceptType.I32),
+                                                        new BytecodeConceptIr.ConceptExpr.IntConst(255),
+                                                        BytecodeConceptIr.ConceptType.I32),
+                                                BytecodeConceptIr.ConceptType.I32),
+                                        BytecodeConceptIr.ConceptType.I32)))),
+                true);
+
+        List<BytecodeConceptIr.ConceptFunction> helpers = new java.util.ArrayList<>();
+        helpers.add(sharedHelper);
+        List<String> entryNames = new java.util.ArrayList<>();
+        BytecodeConceptIr.ConceptFunction primaryEntry = null;
+        for (int i = 0; i < 4; i++) {
+            String fnName = "eval_root_" + i;
+            entryNames.add(fnName);
+            BytecodeConceptIr.ConceptFunction entryFn = new BytecodeConceptIr.ConceptFunction(
+                    owner,
+                    fnName,
+                    "(III)F",
+                    List.of(
+                            new BytecodeConceptIr.ConceptParam("bx", BytecodeConceptIr.ConceptType.I32, 0),
+                            new BytecodeConceptIr.ConceptParam("by", BytecodeConceptIr.ConceptType.I32, 1),
+                            new BytecodeConceptIr.ConceptParam("bz", BytecodeConceptIr.ConceptType.I32, 2)),
+                    BytecodeConceptIr.ConceptType.F32,
+                    java.util.Map.of(),
+                    List.of(new BytecodeConceptIr.ConceptStmt.Return(
+                            new BytecodeConceptIr.ConceptExpr.Call(
+                                    owner,
+                                    "gl_perlin_3d",
+                                    "(IIII)F",
+                                    List.of(
+                                            new BytecodeConceptIr.ConceptExpr.IntConst(i * 64),
+                                            new BytecodeConceptIr.ConceptExpr.Var("bx", BytecodeConceptIr.ConceptType.I32),
+                                            new BytecodeConceptIr.ConceptExpr.Var("by", BytecodeConceptIr.ConceptType.I32),
+                                            new BytecodeConceptIr.ConceptExpr.Var("bz", BytecodeConceptIr.ConceptType.I32)),
+                                    BytecodeConceptIr.ConceptType.F32))),
+                    true);
+            if (i == 0) {
+                primaryEntry = entryFn;
+            } else {
+                helpers.add(entryFn);
+            }
+        }
+
+        ConceptModule module = new ConceptModule(
+                "shared_multi_entry", List.of(lut), helpers, primaryEntry, null, null, List.of());
+        ConceptOptimizerPass.OptimizationConfig nonInline = new ConceptOptimizerPass.OptimizationConfig(
+                false, true, true, false);
+        ConceptModule opt = ConceptOptimizerPass.optimize(module, nonInline);
+
+        OpenClBackendEmitter emitter = new OpenClBackendEmitter();
+        ConceptBackendEmitter.EmitOptions opts = ConceptBackendEmitter.EmitOptions.of(
+                ConceptBackendEmitter.GpuExactArithmeticMode.INT64_Q32_FP32,
+                ConceptBackendEmitter.BatchLayout.DENSITY_VOLUME_BATCH_F32);
+        OpenClBackendEmitter.MultiEntryHelpersProgram prog = emitter.emitMultiEntryHelpers(opt, entryNames, opts);
+
+        assertEquals(4, prog.entryCallExprs().size());
+        long helperDefCount = prog.helpersSource().lines()
+                .filter(l -> l.contains("m_gl_perlin_3d(") && l.trim().endsWith("{"))
+                .count();
+        assertEquals(1L, helperDefCount, "Expected exactly 1 shared gl_perlin_3d definition:\n" + prog.helpersSource());
+        for (int i = 0; i < 4; i++) {
+            assertTrue(prog.entryCallExprs().get(i).contains("m_eval_root_" + i + "(bx, by, bz, gl_lut_spill)"));
+        }
+
+        if (isRealOpenClGpuAvailable()) {
+            String fullKernel = prog.helpersSource()
+                    + "\n__kernel void test_multi(__global float* out, __global const int* gl_lut_spill) {\n"
+                    + "    int bx = (int)get_global_id(0), by = 0, bz = 1;\n"
+                    + "    out[bx] = " + prog.entryCallExprs().get(0) + " + " + prog.entryCallExprs().get(3) + ";\n"
+                    + "}\n";
+            Path tempDir = Files.createTempDirectory("multi-entry-cl-test");
+            try {
+                verifyOpenClCompilesOnGpu(tempDir.resolve("multi_entry.cl"), fullKernel);
+            } finally {
+                deleteRecursively(tempDir);
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("emitFusedBiomeClimate6SharedModule preserves all 6 outputs through optimizer and compiles on GPU")
+    void emitFusedBiomeClimate6SharedModulePreservesAll6ChannelsThroughOptimizerAndCompilesOnGpu() throws Exception {
+        String owner = "test/SharedBiome6";
+        BytecodeConceptIr.ConceptFunction sharedNoise = new BytecodeConceptIr.ConceptFunction(
+                owner,
+                "shared_shift",
+                "(II)F",
+                List.of(
+                        new BytecodeConceptIr.ConceptParam("x", BytecodeConceptIr.ConceptType.I32, 0),
+                        new BytecodeConceptIr.ConceptParam("z", BytecodeConceptIr.ConceptType.I32, 1)),
+                BytecodeConceptIr.ConceptType.F32,
+                java.util.Map.of(),
+                List.of(new BytecodeConceptIr.ConceptStmt.Return(
+                        new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                                BytecodeConceptIr.BinaryOperator.MUL,
+                                new BytecodeConceptIr.ConceptExpr.Cast(
+                                        BytecodeConceptIr.ConceptType.F32,
+                                        new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                                                BytecodeConceptIr.BinaryOperator.ADD,
+                                                new BytecodeConceptIr.ConceptExpr.Var("x", BytecodeConceptIr.ConceptType.I32),
+                                                new BytecodeConceptIr.ConceptExpr.Var("z", BytecodeConceptIr.ConceptType.I32),
+                                                BytecodeConceptIr.ConceptType.I32)),
+                                new BytecodeConceptIr.ConceptExpr.FloatConst(0.01f),
+                                BytecodeConceptIr.ConceptType.F32))),
+                true);
+
+        java.util.Map<String, BytecodeConceptIr.ConceptType> locals = new java.util.LinkedHashMap<>();
+        locals.put("shared_sx", BytecodeConceptIr.ConceptType.F32);
+        List<BytecodeConceptIr.ConceptStmt> body = new java.util.ArrayList<>();
+        body.add(new BytecodeConceptIr.ConceptStmt.Assign(
+                "shared_sx",
+                BytecodeConceptIr.ConceptType.F32,
+                new BytecodeConceptIr.ConceptExpr.Call(
+                        owner,
+                        "shared_shift",
+                        "(II)F",
+                        List.of(
+                                new BytecodeConceptIr.ConceptExpr.Var("bx", BytecodeConceptIr.ConceptType.I32),
+                                new BytecodeConceptIr.ConceptExpr.Var("bz", BytecodeConceptIr.ConceptType.I32)),
+                        BytecodeConceptIr.ConceptType.F32)));
+        for (int c = 0; c < 6; c++) {
+            body.add(new BytecodeConceptIr.ConceptStmt.Assign(
+                    "out_ch" + c,
+                    BytecodeConceptIr.ConceptType.F32,
+                    new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                            BytecodeConceptIr.BinaryOperator.ADD,
+                            new BytecodeConceptIr.ConceptExpr.Var("shared_sx", BytecodeConceptIr.ConceptType.F32),
+                            new BytecodeConceptIr.ConceptExpr.FloatConst((float) c * 0.25f),
+                            BytecodeConceptIr.ConceptType.F32)));
+        }
+
+        List<BytecodeConceptIr.ConceptParam> params = List.of(
+                new BytecodeConceptIr.ConceptParam("bx", BytecodeConceptIr.ConceptType.I32, 0),
+                new BytecodeConceptIr.ConceptParam("by", BytecodeConceptIr.ConceptType.I32, 1),
+                new BytecodeConceptIr.ConceptParam("bz", BytecodeConceptIr.ConceptType.I32, 2),
+                new BytecodeConceptIr.ConceptParam("out_ch0", BytecodeConceptIr.ConceptType.F32, 3),
+                new BytecodeConceptIr.ConceptParam("out_ch1", BytecodeConceptIr.ConceptType.F32, 4),
+                new BytecodeConceptIr.ConceptParam("out_ch2", BytecodeConceptIr.ConceptType.F32, 5),
+                new BytecodeConceptIr.ConceptParam("out_ch3", BytecodeConceptIr.ConceptType.F32, 6),
+                new BytecodeConceptIr.ConceptParam("out_ch4", BytecodeConceptIr.ConceptType.F32, 7),
+                new BytecodeConceptIr.ConceptParam("out_ch5", BytecodeConceptIr.ConceptType.F32, 8));
+
+        BytecodeConceptIr.ConceptFunction entry = new BytecodeConceptIr.ConceptFunction(
+                owner, "evalBiomeClimate6", "(IIIFFFFFF)V", params, BytecodeConceptIr.ConceptType.VOID, locals, body, true);
+        ConceptModule module = new ConceptModule(
+                "shared_biome_climate6", List.of(), List.of(sharedNoise), entry, null, null, List.of());
+
+        ConceptBackendEmitter.EmitOptions opts = ConceptBackendEmitter.EmitOptions.of(
+                ConceptBackendEmitter.GpuExactArithmeticMode.INT64_Q32_FP32,
+                ConceptBackendEmitter.BatchLayout.DENSITY_VOLUME_BATCH_F32);
+        ConceptModule optimized = ConceptOptimizerPass.optimize(module, opts);
+        OpenClBackendEmitter.DensityVolumeProgram prog =
+                new OpenClBackendEmitter().emitFusedBiomeClimate6SharedModule(optimized, opts);
+
+        assertEquals("eval_biome_climate6_batch", prog.kernelName());
+        assertTrue(prog.sourceCode().contains("static void gl_eval_biome_climate6("));
+        assertTrue(prog.sourceCode().contains("gl_eval_biome_climate6(bx, by, bz, gl_ch, gl_lut_spill);"));
+        for (int c = 0; c < 6; c++) {
+            assertTrue(prog.sourceCode().contains("gl_out6[" + c + "] = out_ch" + c + ";"));
+            assertTrue(prog.sourceCode().contains("out_values[out_base + " + c + "] = gl_ch[" + c + "];"));
+        }
+
+        if (isRealOpenClGpuAvailable()) {
+            Path tempDir = Files.createTempDirectory("shared-biome6-cl-test");
+            try {
+                verifyOpenClCompilesOnGpu(tempDir.resolve("shared_biome6.cl"), prog.sourceCode());
+            } finally {
+                deleteRecursively(tempDir);
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("emitSectionFillWithAuxModules deduplicates structurally identical device helpers via #define")
+    void emitSectionFillWithAuxModulesDeduplicatesStructurallyIdenticalHelpers() {
+        String owner = "test/DedupAux";
+        BytecodeConceptIr.ConceptFunction helper = new BytecodeConceptIr.ConceptFunction(
+                owner,
+                "common_hash",
+                "(II)F",
+                List.of(
+                        new BytecodeConceptIr.ConceptParam("x", BytecodeConceptIr.ConceptType.I32, 0),
+                        new BytecodeConceptIr.ConceptParam("z", BytecodeConceptIr.ConceptType.I32, 1)),
+                BytecodeConceptIr.ConceptType.F32,
+                java.util.Map.of(),
+                List.of(new BytecodeConceptIr.ConceptStmt.Return(
+                        new BytecodeConceptIr.ConceptExpr.Cast(
+                                BytecodeConceptIr.ConceptType.F32,
+                                new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                                        BytecodeConceptIr.BinaryOperator.BIT_XOR,
+                                        new BytecodeConceptIr.ConceptExpr.Var("x", BytecodeConceptIr.ConceptType.I32),
+                                        new BytecodeConceptIr.ConceptExpr.Var("z", BytecodeConceptIr.ConceptType.I32),
+                                        BytecodeConceptIr.ConceptType.I32)))),
+                true);
+        BytecodeConceptIr.ConceptFunction primaryFn = new BytecodeConceptIr.ConceptFunction(
+                owner,
+                "evalPrimary",
+                "(III)F",
+                List.of(
+                        new BytecodeConceptIr.ConceptParam("bx", BytecodeConceptIr.ConceptType.I32, 0),
+                        new BytecodeConceptIr.ConceptParam("by", BytecodeConceptIr.ConceptType.I32, 1),
+                        new BytecodeConceptIr.ConceptParam("bz", BytecodeConceptIr.ConceptType.I32, 2)),
+                BytecodeConceptIr.ConceptType.F32,
+                java.util.Map.of(),
+                List.of(new BytecodeConceptIr.ConceptStmt.Return(new BytecodeConceptIr.ConceptExpr.FloatConst(1.0f))),
+                true);
+        BytecodeConceptIr.ConceptFunction auxFn = new BytecodeConceptIr.ConceptFunction(
+                owner,
+                "evalAux",
+                "(III)F",
+                List.of(
+                        new BytecodeConceptIr.ConceptParam("bx", BytecodeConceptIr.ConceptType.I32, 0),
+                        new BytecodeConceptIr.ConceptParam("by", BytecodeConceptIr.ConceptType.I32, 1),
+                        new BytecodeConceptIr.ConceptParam("bz", BytecodeConceptIr.ConceptType.I32, 2)),
+                BytecodeConceptIr.ConceptType.F32,
+                java.util.Map.of(),
+                List.of(new BytecodeConceptIr.ConceptStmt.Return(
+                        new BytecodeConceptIr.ConceptExpr.Call(
+                                owner,
+                                "common_hash",
+                                "(II)F",
+                                List.of(
+                                        new BytecodeConceptIr.ConceptExpr.Var("bx", BytecodeConceptIr.ConceptType.I32),
+                                        new BytecodeConceptIr.ConceptExpr.Var("bz", BytecodeConceptIr.ConceptType.I32)),
+                                BytecodeConceptIr.ConceptType.F32))),
+                true);
+
+        ConceptModule primary = new ConceptModule("primary", List.of(), List.of(), primaryFn, null, null, List.of());
+        ConceptModule aux0 = new ConceptModule("aux0", List.of(), List.of(helper), auxFn, null, null, List.of());
+        ConceptModule aux1 = new ConceptModule("aux1", List.of(), List.of(helper), auxFn, null, null, List.of());
+
+        OpenClBackendEmitter.MultiModuleSectionProgram prog = new OpenClBackendEmitter().emitSectionFillWithAuxModules(
+                primary,
+                null,
+                List.of(aux0, aux1),
+                ConceptBackendEmitter.EmitOptions.of(
+                        ConceptBackendEmitter.GpuExactArithmeticMode.INT64_Q32_FP32,
+                        ConceptBackendEmitter.BatchLayout.SECTION_PALETTE_FILL_U2));
+
+        assertTrue(
+                prog.auxiliaryHelpersSource().contains("#define aux1_common_hash aux0_common_hash"),
+                "Expected aux1_common_hash to alias aux0_common_hash:\n" + prog.auxiliaryHelpersSource());
     }
 }

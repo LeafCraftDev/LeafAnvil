@@ -4095,10 +4095,9 @@ class LcaLayeredPropertyEntropyProofTest {
         int s4SkyNonConstSecs = 0;
         int s4BlkNonConstSecs = 0;
 
-        for (int rIdx = 0; rIdx < allLcaRegions.size() && s3Regions < 12; rIdx += stride12) {
+        for (int rIdx = 0; rIdx < allLcaRegions.size() && s3Regions < 12; rIdx += stride12, s3Regions++) {
             Path regPath = allLcaRegions.get(rIdx);
             byte[] regBytes = Files.readAllBytes(regPath);
-            s3Regions++;
             LcaSectionCodec.AtomicDictState regDictB = new LcaSectionCodec.AtomicDictState();
             LcaSectionCodec.AtomicDictState regDictR = new LcaSectionCodec.AtomicDictState();
             LcaSectionCodec.AtomicDictState regDictL = new LcaSectionCodec.AtomicDictState();
@@ -4110,7 +4109,10 @@ class LcaLayeredPropertyEntropyProofTest {
 
             int chunksInReg = 0;
             for (int rz = 0; rz < 32 && chunksInReg < 36; rz += 4) {
-                for (int rx = 0; rx < 32 && chunksInReg < 36; rx += 4) {
+                for (int rx = 0; rx < 32; rx += 4) {
+                    if (chunksInReg >= 36) {
+                        break;
+                    }
                     if (!LcaRegionReader.INSTANCE.isChunkGenerated(regBytes, rx, rz)) {
                         continue;
                     }
@@ -4283,16 +4285,18 @@ class LcaLayeredPropertyEntropyProofTest {
         long rawTicksUncompSum = 0;
         long colTicksUncompSum = 0;
 
-        for (int rIdx = 0; rIdx < allLcaRegions.size() && s5Regions < 24; rIdx += stride24) {
+        for (int rIdx = 0; rIdx < allLcaRegions.size() && s5Regions < 24; rIdx += stride24, s5Regions++) {
             Path regPath = allLcaRegions.get(rIdx);
             byte[] regBytes = Files.readAllBytes(regPath);
-            s5Regions++;
             LcaSectionCodec.AtomicDictState regBaseDict = new LcaSectionCodec.AtomicDictState();
             LcaSectionCodec.AtomicDictState regColDict = new LcaSectionCodec.AtomicDictState();
             try (FileChannel ch = FileChannel.open(regPath, StandardOpenOption.READ)) {
                 int sampled = 0;
                 for (int rz = 0; rz < 32 && sampled < 32; rz += 4) {
-                    for (int rx = 0; rx < 32 && sampled < 32; rx += 8) {
+                    for (int rx = 0; rx < 32; rx += 8) {
+                        if (sampled >= 32) {
+                            break;
+                        }
                         RawChunkFrameSnapshot snap = LcaRegionReader.readRawChunkFrameFromChannel(regPath, ch, rx, rz, null);
                         if (snap == null) continue;
                         sampled++;
@@ -4443,23 +4447,25 @@ class LcaLayeredPropertyEntropyProofTest {
         // =====================================================================
         long e2eMcaSectorBytes = 0;
         long e2eMcaExactZlibBytes = 0;
-        long e2eCurModeAExact = 0, e2eCurModeASlab256 = 0;
-        long e2eRevModeAExact = 0, e2eRevModeASlab256 = 0;
+        long e2eCurModeASlab256 = 0;
+        long e2eRevModeASlab256 = 0;
         long e2eCurModeBExact = 0, e2eCurModeBSlab256 = 0;
         long e2eRevModeBExact = 0, e2eRevModeBSlab256 = 0;
         int e2eRegions = 0;
         int e2eChunks = 0;
 
-        for (int rIdx = 0; rIdx < allLcaRegions.size() && e2eRegions < 12; rIdx += stride12) {
+        for (int rIdx = 0; rIdx < allLcaRegions.size() && e2eRegions < 12; rIdx += stride12, e2eRegions++) {
             Path regPath = allLcaRegions.get(rIdx);
             byte[] regBytes = Files.readAllBytes(regPath);
-            e2eRegions++;
             LcaSectionCodec.AtomicDictState curRegDict = new LcaSectionCodec.AtomicDictState();
             LcaSectionCodec.AtomicDictState revRegDict = new LcaSectionCodec.AtomicDictState();
             try (FileChannel ch = FileChannel.open(regPath, StandardOpenOption.READ)) {
                 int chunksInReg = 0;
                 for (int rz = 0; rz < 32 && chunksInReg < 24; rz += 6) {
-                    for (int rx = 0; rx < 32 && chunksInReg < 24; rx += 6) {
+                    for (int rx = 0; rx < 32; rx += 6) {
+                        if (chunksInReg >= 24) {
+                            break;
+                        }
                         RawChunkFrameSnapshot snap = LcaRegionReader.readRawChunkFrameFromChannel(regPath, ch, rx, rz, null);
                         if (snap == null) continue;
                         AnvilReader.ChunkEntry full = LcaRegionReader.INSTANCE.readChunk(regBytes, rx, rz);
@@ -4613,9 +4619,7 @@ class LcaLayeredPropertyEntropyProofTest {
                         byte[] revCf = revCfOut.toByteArray();
 
                         // Mode A accounting
-                        e2eCurModeAExact += curModeACf.length;
                         e2eCurModeASlab256 += ((curModeACf.length + 255) & ~255);
-                        e2eRevModeAExact += revCf.length;
                         e2eRevModeASlab256 += ((revCf.length + 255) & ~255);
 
                         // Mode B (Per-Chunk LCD2 + Shared Region AtomicDictState + 256B Slab Alignment)
@@ -4775,7 +4779,6 @@ class LcaLayeredPropertyEntropyProofTest {
             gray[h2] = l ^ (l >>> 1);
         }
         ByteArrayOutputStream out = new ByteArrayOutputStream(64);
-        byte[] vBuf = new byte[5];
         for (int plane = 0; plane < 4; plane++) {
             int mask = 1 << plane;
             int ones = 0;

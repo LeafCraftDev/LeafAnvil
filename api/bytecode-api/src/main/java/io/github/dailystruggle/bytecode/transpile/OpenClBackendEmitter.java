@@ -85,8 +85,61 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
             Map<String, Integer> callCountByFnName,
             Map<String, Integer> memoSlotByFnName,
             int memo2dKeepMask,
-            String memoElemType
+            String memoElemType,
+            CoarseInterpSpec coarseInterpSpec
     ) {
+    }
+
+    /**
+     * Specification for coarse-grid {@code __local} trilinear interpolation inside
+     * {@link BatchLayout#SECTION_PALETTE_FILL_U2} ({@code 16x16x16} section workgroup).
+     * Each coarse function {@code (int x, int y, int z) -> float} is evaluated on the
+     * {@code (16/cellSizeXz + 1) x (16/cellSizeY + 1) x (16/cellSizeXz + 1)} grid into
+     * workgroup {@code __local} memory and trilinearly interpolated into the dense combiner
+     * entry function's {@code K} extra float parameters.
+     */
+    public record CoarseInterpSpec(
+            int cellSizeXz,
+            int cellSizeY,
+            List<String> coarseFunctionNames
+    ) {
+        public static final int MAX_CHANNELS = 8;
+        public static final int MAX_LOCAL_FLOATS = 4096;
+
+        public CoarseInterpSpec {
+            if (cellSizeXz <= 0 || (16 % cellSizeXz) != 0) {
+                throw new IllegalArgumentException("cellSizeXz must divide 16: " + cellSizeXz);
+            }
+            if (cellSizeY <= 0 || (16 % cellSizeY) != 0) {
+                throw new IllegalArgumentException("cellSizeY must divide 16: " + cellSizeY);
+            }
+            Objects.requireNonNull(coarseFunctionNames, "coarseFunctionNames");
+            if (coarseFunctionNames.isEmpty() || coarseFunctionNames.size() > MAX_CHANNELS) {
+                throw new IllegalArgumentException(
+                        "coarseFunctionNames size must be in 1.." + MAX_CHANNELS + ": " + coarseFunctionNames.size());
+            }
+            coarseFunctionNames = List.copyOf(coarseFunctionNames);
+            int nx = (16 / cellSizeXz) + 1;
+            int ny = (16 / cellSizeY) + 1;
+            int totalFloats = nx * ny * nx * coarseFunctionNames.size();
+            if (totalFloats > MAX_LOCAL_FLOATS) {
+                throw new IllegalArgumentException(
+                        "Coarse __local float budget exceeded: " + totalFloats + " > " + MAX_LOCAL_FLOATS);
+            }
+        }
+
+        public int gridSizeXz() {
+            return (16 / cellSizeXz) + 1;
+        }
+
+        public int gridSizeY() {
+            return (16 / cellSizeY) + 1;
+        }
+
+        public int pointsPerChannel() {
+            int nx = gridSizeXz();
+            return nx * gridSizeY() * nx;
+        }
     }
 
     private record DiamondMemoPlan(
@@ -156,6 +209,952 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
                     + ", spilledLutCount=" + this.spilledLutCount
                     + ", deduplicatedLutCount=" + this.deduplicatedLutCount
                     + "]";
+        }
+    }
+
+    /**
+     * Self-contained OpenCL C99 {@code DensityVolume} batch evaluation program with deterministic
+     * SHA-256 content digest and optional {@code __global const int*} spilled LUT payload.
+     */
+    public record DensityVolumeProgram(
+            String kernelName,
+            String sourceCode,
+            String kernelDigestSha256,
+            int[] spilledLutWords,
+            int usedConstantBytes,
+            int spilledLutCount,
+            int deduplicatedLutCount
+    ) {
+        public DensityVolumeProgram {
+            Objects.requireNonNull(kernelName, "kernelName");
+            Objects.requireNonNull(sourceCode, "sourceCode");
+            Objects.requireNonNull(kernelDigestSha256, "kernelDigestSha256");
+            spilledLutWords = spilledLutWords == null ? new int[0] : java.util.Arrays.copyOf(spilledLutWords, spilledLutWords.length);
+        }
+
+        @Override
+        public int[] spilledLutWords() {
+            return java.util.Arrays.copyOf(spilledLutWords, spilledLutWords.length);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof DensityVolumeProgram other)) {
+                return false;
+            }
+            return java.util.Objects.equals(this.kernelName, other.kernelName)
+                    && java.util.Objects.equals(this.sourceCode, other.sourceCode)
+                    && java.util.Objects.equals(this.kernelDigestSha256, other.kernelDigestSha256)
+                    && java.util.Arrays.equals(this.spilledLutWords, other.spilledLutWords)
+                    && this.usedConstantBytes == other.usedConstantBytes
+                    && this.spilledLutCount == other.spilledLutCount
+                    && this.deduplicatedLutCount == other.deduplicatedLutCount;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + java.util.Objects.hashCode(this.kernelName);
+            result = 31 * result + java.util.Objects.hashCode(this.sourceCode);
+            result = 31 * result + java.util.Objects.hashCode(this.kernelDigestSha256);
+            result = 31 * result + java.util.Arrays.hashCode(this.spilledLutWords);
+            result = 31 * result + this.usedConstantBytes;
+            result = 31 * result + this.spilledLutCount;
+            result = 31 * result + this.deduplicatedLutCount;
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "DensityVolumeProgram[kernelName=" + this.kernelName
+                    + ", sourceCode=" + this.sourceCode
+                    + ", kernelDigestSha256=" + this.kernelDigestSha256
+                    + ", spilledLutWords=" + java.util.Arrays.toString(this.spilledLutWords)
+                    + ", usedConstantBytes=" + this.usedConstantBytes
+                    + ", spilledLutCount=" + this.spilledLutCount
+                    + ", deduplicatedLutCount=" + this.deduplicatedLutCount
+                    + "]";
+        }
+    }
+
+    /**
+     * Emits a self-contained {@link BatchLayout#DENSITY_VOLUME_BATCH_F32} OpenCL C99 program with
+     * automatic {@code __constant} LUT compaction/deduplication, {@code __global const int*}
+     * overflow spill ({@code gl_lut_spill}), and a deterministic SHA-256 content digest suitable
+     * for JAR-packed kernel lookup and on-disk binary caching.
+     */
+    public DensityVolumeProgram emitDensityVolumeBatchProgram(ConceptModule module, EmitOptions options) {
+        Objects.requireNonNull(module, "module");
+        Objects.requireNonNull(options, "options");
+        ConstantLutAllocator allocator = new ConstantLutAllocator(MAX_CONSTANT_BUDGET_BYTES, 0, "gl_lut_spill");
+        EmitOptions volumeOpts = options.withBatchLayout(BatchLayout.DENSITY_VOLUME_BATCH_F32);
+        TranspiledArtifact artifact = emitWithAllocator(module, volumeOpts, "", allocator, true);
+        int[] spilled = allocator.spilledWordsArray();
+        String kernelName = artifact.kernel3DName() != null ? artifact.kernel3DName() : "evaluate_density_volume_batch_f32";
+        String digest = computeDensityVolumeDigest(volumeOpts.gpuExactArithmeticMode(), artifact.sourceCode(), spilled);
+        return new DensityVolumeProgram(
+                kernelName,
+                artifact.sourceCode(),
+                digest,
+                spilled,
+                allocator.usedConstantBytes(),
+                allocator.spilledLutCount(),
+                allocator.deduplicatedLutCount());
+    }
+
+    /**
+     * Emits a single fused 6-channel OpenCL C99 program ({@code eval_biome_climate6_batch}) that
+     * evaluates all 6 climate {@link ConceptModule}s ({@code temperature}, {@code vegetation},
+     * {@code continents}, {@code erosion}, {@code depth}, {@code ridges}) in one kernel dispatch
+     * and one contiguous interleaved {@code float[batch * volume * 6]} readback while deduplicating
+     * shared noise LUTs across all 6 channels.
+     */
+    public DensityVolumeProgram emitFusedBiomeClimateBatchProgram(
+            List<ConceptModule> climateModules6,
+            EmitOptions options) {
+        Objects.requireNonNull(climateModules6, "climateModules6");
+        Objects.requireNonNull(options, "options");
+        if (climateModules6.size() != 6) {
+            throw new IllegalArgumentException(
+                    "emitFusedBiomeClimateBatchProgram requires exactly 6 climate modules, got " + climateModules6.size());
+        }
+        ConstantLutAllocator allocator = new ConstantLutAllocator(MAX_CONSTANT_BUDGET_BYTES, 0, "gl_lut_spill");
+        EmitOptions volumeOpts = options.withBatchLayout(BatchLayout.DENSITY_VOLUME_BATCH_F32);
+        GpuExactArithmeticMode arithmeticMode = volumeOpts.gpuExactArithmeticMode();
+
+        StringBuilder sb = new StringBuilder(8192);
+        sb.append("// Auto-generated fused 6-channel OpenCL C99 biome climate kernel\n");
+        if (arithmeticMode == GpuExactArithmeticMode.NATIVE_FP64) {
+            sb.append("#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n");
+            sb.append("#pragma OPENCL FP_CONTRACT OFF\n\n");
+        } else if (arithmeticMode == GpuExactArithmeticMode.INT64_Q32_FP32) {
+            sb.append("// Floating-point mode: INT64_Q32_FP32 (64-bit Q32.32 coordinate arithmetic + FP32 interpolation)\n");
+            sb.append("#pragma OPENCL FP_CONTRACT OFF\n\n");
+            emitQ32Helpers(sb);
+            sb.append('\n');
+        } else {
+            sb.append("// Floating-point mode: DOWNCAST_FP32\n");
+            sb.append("#pragma OPENCL FP_CONTRACT OFF\n\n");
+        }
+
+        String[] channelCallExprs = new String[6];
+        boolean[] channelQ32Ret = new boolean[6];
+        Map<String, String> canonicalHelperBodies = new LinkedHashMap<>();
+        EmitScope prevScope = ACTIVE_EMIT_SCOPE.get();
+        try {
+            for (int c = 0; c < 6; c++) {
+                ConceptModule rawModule = Objects.requireNonNull(climateModules6.get(c), "climateModules6[" + c + "]");
+                ConceptModule lowered = ConceptOptimizerPass.deduplicateLookupTables(rawModule);
+                Q32LoweringPlan q32Plan = arithmeticMode.usesInt64Q32()
+                        ? ConceptOptimizerPass.analyzeQ32Lowering(lowered)
+                        : Q32LoweringPlan.empty();
+
+                Map<String, ConceptFunction> fnByKey = new LinkedHashMap<>();
+                Map<String, ConceptFunction> fnByName = new LinkedHashMap<>();
+                registerFunctionLookup(lowered, fnByKey, fnByName);
+                Map<String, Integer> callCountByFnName = countFunctionCallSites(lowered, fnByKey, fnByName);
+
+                String chPrefix = "ch" + c + "_";
+                ACTIVE_EMIT_SCOPE.set(new EmitScope(
+                        chPrefix,
+                        allocator,
+                        true,
+                        callCountByFnName,
+                        DiamondMemoPlan.EMPTY.fnNameToSlot(),
+                        DiamondMemoPlan.EMPTY.keep2dMask(),
+                        DiamondMemoPlan.EMPTY.elemType(),
+                        null));
+
+                sb.append("// --- Climate channel ").append(c).append(": ").append(lowered.moduleName()).append(" ---\n");
+                for (ConceptLut lut : lowered.lookupTables()) {
+                    if (arithmeticMode.usesInt64Q32()
+                            && lut.elementType() == ConceptType.F64
+                            && q32Plan.q32LutSymbol(lut.symbolName()) != null
+                            && !q32Plan.isFp32ReferencedLut(lut.symbolName())) {
+                        continue;
+                    }
+                    allocator.allocateAndEmit(sb, lut, volumeOpts, chPrefix);
+                    sb.append('\n');
+                }
+                if (arithmeticMode.usesInt64Q32()) {
+                    for (ConceptLut q32Lut : q32Plan.synthesizedQ32Luts()) {
+                        allocator.allocateAndEmit(sb, q32Lut, volumeOpts, chPrefix);
+                        sb.append('\n');
+                    }
+                }
+                emitDeduplicatedModuleHelpers(
+                        sb, lowered.helperFunctions(), chPrefix, volumeOpts, q32Plan, fnByKey, fnByName, canonicalHelperBodies);
+                emitDeviceFunction(sb, lowered.entryFunction(), volumeOpts, q32Plan, fnByKey, fnByName);
+                sb.append('\n');
+
+                ConceptFunction target = lowered.entryFunction();
+                String rawCall = buildIntCoordTargetCall(target, "bx", "by", "bz", volumeOpts, q32Plan);
+                String callExpr = chPrefix + rawCall;
+                int closeParen = callExpr.lastIndexOf(')');
+                String beforeClose = callExpr.substring(0, closeParen);
+                String sep = beforeClose.endsWith("(") ? "" : ", ";
+                channelCallExprs[c] = beforeClose + sep + "gl_lut_spill)";
+                channelQ32Ret[c] = arithmeticMode.usesInt64Q32() && q32Plan.isQ32Return(target);
+            }
+        } finally {
+            if (prevScope == null) {
+                ACTIVE_EMIT_SCOPE.remove();
+            } else {
+                ACTIVE_EMIT_SCOPE.set(prevScope);
+            }
+        }
+
+        String kernelName = "eval_biome_climate6_batch";
+        sb.append("__kernel void ")
+                .append(kernelName)
+                .append("(\n")
+                .append("    __global float* restrict out_values,\n")
+                .append("    __global const int4* restrict batch_origins,\n")
+                .append("    const int batch_count,\n")
+                .append("    const int size_x,\n")
+                .append("    const int size_y,\n")
+                .append("    const int size_z,\n")
+                .append("    const int step_x,\n")
+                .append("    const int step_y,\n")
+                .append("    const int step_z,\n")
+                .append("    __global const int* restrict gl_lut_spill)\n")
+                .append("{\n")
+                .append("    const int gid = (int)get_global_id(0);\n")
+                .append("    const int volume_size = size_x * size_y * size_z;\n")
+                .append("    const int total_voxels = batch_count * volume_size;\n")
+                .append("    if (gid >= total_voxels) {\n")
+                .append("        return;\n")
+                .append("    }\n")
+                .append("    const int batch_idx = gid / volume_size;\n")
+                .append("    const int voxel_idx = gid - batch_idx * volume_size;\n")
+                .append("    const int col_idx = voxel_idx / size_y;\n")
+                .append("    const int ly = voxel_idx - col_idx * size_y;\n")
+                .append("    const int lz = col_idx / size_x;\n")
+                .append("    const int lx = col_idx - lz * size_x;\n")
+                .append("    const int4 orig = batch_origins[batch_idx];\n")
+                .append("    const int bx = orig.x + lx * step_x;\n")
+                .append("    const int by = orig.y + ly * step_y;\n")
+                .append("    const int bz = orig.z + lz * step_z;\n")
+                .append("    const int out_base = gid * 6;\n");
+        for (int c = 0; c < 6; c++) {
+            sb.append("    out_values[out_base + ").append(c).append("] = ");
+            if (channelQ32Ret[c]) {
+                sb.append("q32_to_f32(").append(channelCallExprs[c]).append(");\n");
+            } else {
+                sb.append("(float)(").append(channelCallExprs[c]).append(");\n");
+            }
+        }
+        sb.append("}\n");
+
+        int[] spilled = allocator.spilledWordsArray();
+        String source = sb.toString();
+        String digest = computeDensityVolumeDigest(arithmeticMode, source, spilled);
+        return new DensityVolumeProgram(
+                kernelName,
+                source,
+                digest,
+                spilled,
+                allocator.usedConstantBytes(),
+                allocator.spilledLutCount(),
+                allocator.deduplicatedLutCount());
+    }
+
+    /**
+     * Emits a fused 6-channel {@code eval_biome_climate6_batch} OpenCL program from a single
+     * shared-DAG {@link ConceptModule} whose entry function takes 3 {@code I32} coordinates followed
+     * by 6 {@code F32} output parameters ({@code out_ch0..out_ch5}), eliminating cross-channel
+     * recomputation of shared shift/continents/erosion/ridges sub-DAGs.
+     */
+    public DensityVolumeProgram emitFusedBiomeClimate6SharedModule(
+            ConceptModule sharedModule,
+            EmitOptions options) {
+        Objects.requireNonNull(sharedModule, "sharedModule");
+        Objects.requireNonNull(options, "options");
+        ConceptModule lowered = ConceptOptimizerPass.deduplicateLookupTables(sharedModule);
+        ConceptFunction entry = lowered.entryFunction();
+        List<ConceptParam> params = entry.parameters();
+        if (params.size() != 9
+                || params.get(0).type() != ConceptType.I32
+                || params.get(1).type() != ConceptType.I32
+                || params.get(2).type() != ConceptType.I32) {
+            throw new IllegalArgumentException(
+                    "emitFusedBiomeClimate6SharedModule requires 3 I32 coordinate params + 6 F32 output params, got "
+                            + params.size());
+        }
+        for (int c = 0; c < 6; c++) {
+            if (params.get(3 + c).type() != ConceptType.F32) {
+                throw new IllegalArgumentException(
+                        "emitFusedBiomeClimate6SharedModule output param " + (3 + c) + " must be F32, got "
+                                + params.get(3 + c).type());
+            }
+        }
+        List<ConceptStmt> rawBody = entry.body();
+        int bodyEnd = rawBody.size();
+        if (bodyEnd > 0 && rawBody.get(bodyEnd - 1) instanceof ConceptStmt.Return) {
+            bodyEnd--;
+        }
+        List<ConceptStmt> effectiveBody = rawBody.subList(0, bodyEnd);
+        if (containsReturnStmt(effectiveBody)) {
+            throw new IllegalArgumentException(
+                    "emitFusedBiomeClimate6SharedModule entry function must not contain non-trailing Return statements");
+        }
+
+        ConstantLutAllocator allocator = new ConstantLutAllocator(MAX_CONSTANT_BUDGET_BYTES, 0, "gl_lut_spill");
+        EmitOptions volumeOpts = options.withBatchLayout(BatchLayout.DENSITY_VOLUME_BATCH_F32);
+        GpuExactArithmeticMode arithmeticMode = volumeOpts.gpuExactArithmeticMode();
+        Q32LoweringPlan q32Plan = arithmeticMode.usesInt64Q32()
+                ? ConceptOptimizerPass.analyzeQ32Lowering(lowered)
+                : Q32LoweringPlan.empty();
+
+        Map<String, ConceptFunction> fnByKey = new LinkedHashMap<>();
+        Map<String, ConceptFunction> fnByName = new LinkedHashMap<>();
+        registerFunctionLookup(lowered, fnByKey, fnByName);
+        Map<String, Integer> callCountByFnName = countFunctionCallSites(lowered, fnByKey, fnByName);
+
+        StringBuilder sb = new StringBuilder(8192);
+        sb.append("// Auto-generated shared-DAG 6-channel OpenCL C99 biome climate kernel\n");
+        if (arithmeticMode == GpuExactArithmeticMode.NATIVE_FP64) {
+            sb.append("#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n");
+            sb.append("#pragma OPENCL FP_CONTRACT OFF\n\n");
+        } else if (arithmeticMode == GpuExactArithmeticMode.INT64_Q32_FP32) {
+            sb.append("// Floating-point mode: INT64_Q32_FP32 (64-bit Q32.32 coordinate arithmetic + FP32 interpolation)\n");
+            sb.append("#pragma OPENCL FP_CONTRACT OFF\n\n");
+            emitQ32Helpers(sb);
+            sb.append('\n');
+        } else {
+            sb.append("// Floating-point mode: DOWNCAST_FP32\n");
+            sb.append("#pragma OPENCL FP_CONTRACT OFF\n\n");
+        }
+
+        String prefix = "glc_";
+        EmitScope prevScope = ACTIVE_EMIT_SCOPE.get();
+        ACTIVE_EMIT_SCOPE.set(new EmitScope(
+                prefix,
+                allocator,
+                true,
+                callCountByFnName,
+                DiamondMemoPlan.EMPTY.fnNameToSlot(),
+                DiamondMemoPlan.EMPTY.keep2dMask(),
+                DiamondMemoPlan.EMPTY.elemType(),
+                null));
+        try {
+            for (ConceptLut lut : lowered.lookupTables()) {
+                if (arithmeticMode.usesInt64Q32()
+                        && lut.elementType() == ConceptType.F64
+                        && q32Plan.q32LutSymbol(lut.symbolName()) != null
+                        && !q32Plan.isFp32ReferencedLut(lut.symbolName())) {
+                    continue;
+                }
+                allocator.allocateAndEmit(sb, lut, volumeOpts, prefix);
+                sb.append('\n');
+            }
+            if (arithmeticMode.usesInt64Q32()) {
+                for (ConceptLut q32Lut : q32Plan.synthesizedQ32Luts()) {
+                    allocator.allocateAndEmit(sb, q32Lut, volumeOpts, prefix);
+                    sb.append('\n');
+                }
+            }
+            for (ConceptFunction helper : lowered.helperFunctions()) {
+                emitDeviceFunctionPrototype(sb, helper, volumeOpts, q32Plan);
+            }
+            if (!lowered.helperFunctions().isEmpty()) {
+                sb.append('\n');
+            }
+            for (ConceptFunction helper : lowered.helperFunctions()) {
+                emitDeviceFunction(sb, helper, volumeOpts, q32Plan, fnByKey, fnByName);
+                sb.append('\n');
+            }
+            sb.append("static void gl_eval_biome_climate6(\n")
+                    .append("    const int ").append(params.get(0).name()).append(",\n")
+                    .append("    const int ").append(params.get(1).name()).append(",\n")
+                    .append("    const int ").append(params.get(2).name()).append(",\n")
+                    .append("    float* restrict gl_out6,\n")
+                    .append("    ").append(openClGlobalPtrParam("int", true, allocator.globalSpillBufferName))
+                    .append(") {\n")
+                    .append("    (void)").append(allocator.globalSpillBufferName).append(";\n");
+            for (int c = 0; c < 6; c++) {
+                sb.append("    float ").append(params.get(3 + c).name()).append(" = 0.0f;\n");
+            }
+            emitStatements(sb, entry, effectiveBody, volumeOpts, q32Plan, fnByKey, fnByName, 1);
+            for (int c = 0; c < 6; c++) {
+                sb.append("    gl_out6[").append(c).append("] = ").append(params.get(3 + c).name()).append(";\n");
+            }
+            sb.append("}\n\n");
+        } finally {
+            if (prevScope == null) {
+                ACTIVE_EMIT_SCOPE.remove();
+            } else {
+                ACTIVE_EMIT_SCOPE.set(prevScope);
+            }
+        }
+
+        String kernelName = "eval_biome_climate6_batch";
+        sb.append("__kernel void ")
+                .append(kernelName)
+                .append("(\n")
+                .append("    __global float* restrict out_values,\n")
+                .append("    __global const int4* restrict batch_origins,\n")
+                .append("    const int batch_count,\n")
+                .append("    const int size_x,\n")
+                .append("    const int size_y,\n")
+                .append("    const int size_z,\n")
+                .append("    const int step_x,\n")
+                .append("    const int step_y,\n")
+                .append("    const int step_z,\n")
+                .append("    __global const int* restrict gl_lut_spill)\n")
+                .append("{\n")
+                .append("    const int gid = (int)get_global_id(0);\n")
+                .append("    const int volume_size = size_x * size_y * size_z;\n")
+                .append("    const int total_voxels = batch_count * volume_size;\n")
+                .append("    if (gid >= total_voxels) {\n")
+                .append("        return;\n")
+                .append("    }\n")
+                .append("    const int batch_idx = gid / volume_size;\n")
+                .append("    const int voxel_idx = gid - batch_idx * volume_size;\n")
+                .append("    const int col_idx = voxel_idx / size_y;\n")
+                .append("    const int ly = voxel_idx - col_idx * size_y;\n")
+                .append("    const int lz = col_idx / size_x;\n")
+                .append("    const int lx = col_idx - lz * size_x;\n")
+                .append("    const int4 orig = batch_origins[batch_idx];\n")
+                .append("    const int bx = orig.x + lx * step_x;\n")
+                .append("    const int by = orig.y + ly * step_y;\n")
+                .append("    const int bz = orig.z + lz * step_z;\n")
+                .append("    float gl_ch[6];\n")
+                .append("    gl_eval_biome_climate6(bx, by, bz, gl_ch, gl_lut_spill);\n")
+                .append("    const int out_base = gid * 6;\n")
+                .append("    out_values[out_base + 0] = gl_ch[0];\n")
+                .append("    out_values[out_base + 1] = gl_ch[1];\n")
+                .append("    out_values[out_base + 2] = gl_ch[2];\n")
+                .append("    out_values[out_base + 3] = gl_ch[3];\n")
+                .append("    out_values[out_base + 4] = gl_ch[4];\n")
+                .append("    out_values[out_base + 5] = gl_ch[5];\n")
+                .append("}\n");
+
+        int[] spilled = allocator.spilledWordsArray();
+        String source = sb.toString();
+        String digest = computeDensityVolumeDigest(arithmeticMode, source, spilled);
+        return new DensityVolumeProgram(
+                kernelName,
+                source,
+                digest,
+                spilled,
+                allocator.usedConstantBytes(),
+                allocator.spilledLutCount(),
+                allocator.deduplicatedLutCount());
+    }
+
+    private static boolean containsReturnStmt(List<ConceptStmt> stmts) {
+        for (ConceptStmt stmt : stmts) {
+            if (stmt instanceof ConceptStmt.Return) {
+                return true;
+            }
+            if (stmt instanceof ConceptStmt.If ifStmt
+                    && (containsReturnStmt(ifStmt.thenBody()) || containsReturnStmt(ifStmt.elseBody()))) {
+                return true;
+            }
+            if (stmt instanceof ConceptStmt.While whileStmt && containsReturnStmt(whileStmt.body())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Emits a self-contained {@link BatchLayout#SECTION_PALETTE_FILL_U2} OpenCL C99 program that
+     * fuses 3D density evaluation, 2-bit palette classification, {@code (ly << 8) | (lz << 4) | lx}
+     * bit-packing ({@code 1024 B/section}), and per-section uniformity/block-count reduction
+     * ({@code 8 B/section}) for compact zero-allocation DMA writeback.
+     */
+    public DensityVolumeProgram emitSectionPaletteFillProgram(ConceptModule module, EmitOptions options) {
+        Objects.requireNonNull(module, "module");
+        Objects.requireNonNull(options, "options");
+        ConstantLutAllocator allocator = new ConstantLutAllocator(MAX_CONSTANT_BUDGET_BYTES, 0, "gl_lut_spill");
+        EmitOptions fillOpts = options.withBatchLayout(BatchLayout.SECTION_PALETTE_FILL_U2);
+        TranspiledArtifact artifact = emitWithAllocator(module, fillOpts, "", allocator, true);
+        int[] spilled = allocator.spilledWordsArray();
+        String kernelName = artifact.kernel3DName() != null ? artifact.kernel3DName() : "fill_section_palette_batch_u2";
+        String digest = computeDensityVolumeDigest(fillOpts.gpuExactArithmeticMode(), artifact.sourceCode(), spilled);
+        return new DensityVolumeProgram(
+                kernelName,
+                artifact.sourceCode(),
+                digest,
+                spilled,
+                allocator.usedConstantBytes(),
+                allocator.spilledLutCount(),
+                allocator.deduplicatedLutCount());
+    }
+
+    /**
+     * Emits a self-contained {@link BatchLayout#SECTION_PALETTE_FILL_U2} OpenCL C99 program that
+     * evaluates {@code coarseSpec.coarseFunctionNames()} on the coarse section grid into
+     * workgroup {@code __local} memory, trilinearly interpolates all {@code 4096} voxels in
+     * registers, invokes the dense combiner entry function, and packs 2-bit section palettes
+     * ({@code 1024 B/section}) + uniformity metadata ({@code 8 B/section}).
+     */
+    public DensityVolumeProgram emitInterpolatedSectionPaletteFillProgram(
+            ConceptModule module,
+            EmitOptions options,
+            CoarseInterpSpec coarseSpec) {
+        Objects.requireNonNull(module, "module");
+        Objects.requireNonNull(options, "options");
+        Objects.requireNonNull(coarseSpec, "coarseSpec");
+        ConstantLutAllocator allocator = new ConstantLutAllocator(MAX_CONSTANT_BUDGET_BYTES, 0, "gl_lut_spill");
+        EmitOptions fillOpts = options.withBatchLayout(BatchLayout.SECTION_PALETTE_FILL_U2);
+        TranspiledArtifact artifact = emitWithAllocatorAndMemo(
+                module, fillOpts, "", allocator, true, DiamondMemoPlan.EMPTY, coarseSpec);
+        int[] spilled = allocator.spilledWordsArray();
+        String kernelName = artifact.kernel3DName() != null ? artifact.kernel3DName() : "fill_section_palette_batch_u2";
+        String digest = computeDensityVolumeDigest(fillOpts.gpuExactArithmeticMode(), artifact.sourceCode(), spilled);
+        return new DensityVolumeProgram(
+                kernelName,
+                artifact.sourceCode(),
+                digest,
+                spilled,
+                allocator.usedConstantBytes(),
+                allocator.spilledLutCount(),
+                allocator.deduplicatedLutCount());
+    }
+
+    /**
+     * Emitted primary section-fill program combined with auxiliary {@link ConceptModule} device
+     * helpers sharing one {@link ConstantLutAllocator} and {@code gl_lut_spill} buffer.
+     */
+    public record MultiModuleSectionProgram(
+            String primarySourceCode,
+            String auxiliaryHelpersSource,
+            List<String> auxEntryCallExprs,
+            int[] spilledLutWords,
+            int usedConstantBytes,
+            int spilledLutCount,
+            int deduplicatedLutCount) {
+        public MultiModuleSectionProgram {
+            Objects.requireNonNull(primarySourceCode, "primarySourceCode");
+            Objects.requireNonNull(auxiliaryHelpersSource, "auxiliaryHelpersSource");
+            auxEntryCallExprs = List.copyOf(Objects.requireNonNull(auxEntryCallExprs, "auxEntryCallExprs"));
+            spilledLutWords = spilledLutWords == null ? new int[0] : java.util.Arrays.copyOf(spilledLutWords, spilledLutWords.length);
+        }
+
+        @Override
+        public int[] spilledLutWords() {
+            return java.util.Arrays.copyOf(spilledLutWords, spilledLutWords.length);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof MultiModuleSectionProgram other)) {
+                return false;
+            }
+            return java.util.Objects.equals(this.primarySourceCode, other.primarySourceCode)
+                    && java.util.Objects.equals(this.auxiliaryHelpersSource, other.auxiliaryHelpersSource)
+                    && java.util.Objects.equals(this.auxEntryCallExprs, other.auxEntryCallExprs)
+                    && java.util.Arrays.equals(this.spilledLutWords, other.spilledLutWords)
+                    && this.usedConstantBytes == other.usedConstantBytes
+                    && this.spilledLutCount == other.spilledLutCount
+                    && this.deduplicatedLutCount == other.deduplicatedLutCount;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + java.util.Objects.hashCode(this.primarySourceCode);
+            result = 31 * result + java.util.Objects.hashCode(this.auxiliaryHelpersSource);
+            result = 31 * result + java.util.Objects.hashCode(this.auxEntryCallExprs);
+            result = 31 * result + java.util.Arrays.hashCode(this.spilledLutWords);
+            result = 31 * result + this.usedConstantBytes;
+            result = 31 * result + this.spilledLutCount;
+            result = 31 * result + this.deduplicatedLutCount;
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "MultiModuleSectionProgram[primarySourceCode=" + this.primarySourceCode
+                    + ", auxiliaryHelpersSource=" + this.auxiliaryHelpersSource
+                    + ", auxEntryCallExprs=" + this.auxEntryCallExprs
+                    + ", spilledLutWords=" + java.util.Arrays.toString(this.spilledLutWords)
+                    + ", usedConstantBytes=" + this.usedConstantBytes
+                    + ", spilledLutCount=" + this.spilledLutCount
+                    + ", deduplicatedLutCount=" + this.deduplicatedLutCount
+                    + "]";
+        }
+    }
+
+    /**
+     * Emits the primary section-fill {@link ConceptModule} (coarse-interpolated when
+     * {@code coarseSpec != null}) alongside any number of auxiliary {@link ConceptModule}s
+     * (e.g., {@code MaterialRule} surface noises, {@code preliminarySurface}, and {@code OreVeinRule}
+     * densities), sharing a single {@link ConstantLutAllocator} so all noise LUTs deduplicate into
+     * one {@code __constant} / {@code gl_lut_spill} namespace.
+     */
+    public MultiModuleSectionProgram emitSectionFillWithAuxModules(
+            ConceptModule primaryModule,
+            CoarseInterpSpec coarseSpec,
+            List<ConceptModule> auxModules,
+            EmitOptions options) {
+        Objects.requireNonNull(primaryModule, "primaryModule");
+        Objects.requireNonNull(auxModules, "auxModules");
+        Objects.requireNonNull(options, "options");
+        ConstantLutAllocator allocator = new ConstantLutAllocator(MAX_CONSTANT_BUDGET_BYTES, 0, "gl_lut_spill");
+        EmitOptions fillOpts = options.withBatchLayout(BatchLayout.SECTION_PALETTE_FILL_U2);
+        GpuExactArithmeticMode arithmeticMode = fillOpts.gpuExactArithmeticMode();
+
+        TranspiledArtifact primaryArtifact = emitWithAllocatorAndMemo(
+                primaryModule, fillOpts, "", allocator, true, DiamondMemoPlan.EMPTY, coarseSpec);
+
+        StringBuilder auxSb = new StringBuilder(4096);
+        List<String> auxCallExprs = new ArrayList<>(auxModules.size());
+        EmitOptions volumeOpts = options.withBatchLayout(BatchLayout.DENSITY_VOLUME_BATCH_F32);
+        Map<String, String> canonicalHelperBodies = new LinkedHashMap<>();
+        EmitScope prevScope = ACTIVE_EMIT_SCOPE.get();
+        try {
+            for (int i = 0; i < auxModules.size(); i++) {
+                ConceptModule rawModule = Objects.requireNonNull(auxModules.get(i), "auxModules[" + i + "]");
+                ConceptModule lowered = ConceptOptimizerPass.deduplicateLookupTables(rawModule);
+                Q32LoweringPlan q32Plan = arithmeticMode.usesInt64Q32()
+                        ? ConceptOptimizerPass.analyzeQ32Lowering(lowered)
+                        : Q32LoweringPlan.empty();
+
+                Map<String, ConceptFunction> fnByKey = new LinkedHashMap<>();
+                Map<String, ConceptFunction> fnByName = new LinkedHashMap<>();
+                registerFunctionLookup(lowered, fnByKey, fnByName);
+                Map<String, Integer> callCountByFnName = countFunctionCallSites(lowered, fnByKey, fnByName);
+
+                String prefix = "aux" + i + "_";
+                ACTIVE_EMIT_SCOPE.set(new EmitScope(
+                        prefix,
+                        allocator,
+                        true,
+                        callCountByFnName,
+                        DiamondMemoPlan.EMPTY.fnNameToSlot(),
+                        DiamondMemoPlan.EMPTY.keep2dMask(),
+                        DiamondMemoPlan.EMPTY.elemType(),
+                        null));
+
+                auxSb.append("// --- Aux module ").append(i).append(": ").append(lowered.moduleName()).append(" ---\n");
+                for (ConceptLut lut : lowered.lookupTables()) {
+                    if (arithmeticMode.usesInt64Q32()
+                            && lut.elementType() == ConceptType.F64
+                            && q32Plan.q32LutSymbol(lut.symbolName()) != null
+                            && !q32Plan.isFp32ReferencedLut(lut.symbolName())) {
+                        continue;
+                    }
+                    allocator.allocateAndEmit(auxSb, lut, volumeOpts, prefix);
+                    auxSb.append('\n');
+                }
+                if (arithmeticMode.usesInt64Q32()) {
+                    for (ConceptLut q32Lut : q32Plan.synthesizedQ32Luts()) {
+                        allocator.allocateAndEmit(auxSb, q32Lut, volumeOpts, prefix);
+                        auxSb.append('\n');
+                    }
+                }
+                emitDeduplicatedModuleHelpers(
+                        auxSb, lowered.helperFunctions(), prefix, volumeOpts, q32Plan, fnByKey, fnByName, canonicalHelperBodies);
+                emitDeviceFunction(auxSb, lowered.entryFunction(), volumeOpts, q32Plan, fnByKey, fnByName);
+                auxSb.append('\n');
+
+                ConceptFunction target = lowered.entryFunction();
+                String rawCall = buildIntCoordTargetCall(target, "bx", "by", "bz", volumeOpts, q32Plan);
+                String callExpr = prefix + rawCall;
+                int closeParen = callExpr.lastIndexOf(')');
+                String beforeClose = callExpr.substring(0, closeParen);
+                String sep = beforeClose.endsWith("(") ? "" : ", ";
+                String fullCall = beforeClose + sep + "gl_lut_spill)";
+                if (arithmeticMode.usesInt64Q32() && q32Plan.isQ32Return(target)) {
+                    auxCallExprs.add("q32_to_f32(" + fullCall + ")");
+                } else {
+                    auxCallExprs.add("(float)(" + fullCall + ")");
+                }
+            }
+        } finally {
+            if (prevScope == null) {
+                ACTIVE_EMIT_SCOPE.remove();
+            } else {
+                ACTIVE_EMIT_SCOPE.set(prevScope);
+            }
+        }
+
+        return new MultiModuleSectionProgram(
+                primaryArtifact.sourceCode(),
+                auxSb.toString(),
+                auxCallExprs,
+                allocator.spilledWordsArray(),
+                allocator.usedConstantBytes(),
+                allocator.spilledLutCount(),
+                allocator.deduplicatedLutCount());
+    }
+
+    /**
+     * Compiled multi-entry OpenCL device-helper bundle produced from a single shared
+     * {@link ConceptModule} so all entry functions share one {@link ConstantLutAllocator},
+     * one {@code gl_lut_spill} buffer, and one copy of each shared device helper (e.g.
+     * {@code gl_perlin_3d}).
+     */
+    public record MultiEntryHelpersProgram(
+            String helpersSource,
+            List<String> entryCallExprs,
+            int[] spilledLutWords,
+            int usedConstantBytes,
+            int spilledLutCount,
+            int deduplicatedLutCount) {
+        public MultiEntryHelpersProgram {
+            Objects.requireNonNull(helpersSource, "helpersSource");
+            entryCallExprs = List.copyOf(Objects.requireNonNull(entryCallExprs, "entryCallExprs"));
+            spilledLutWords = spilledLutWords == null ? new int[0] : java.util.Arrays.copyOf(spilledLutWords, spilledLutWords.length);
+        }
+
+        @Override
+        public int[] spilledLutWords() {
+            return java.util.Arrays.copyOf(spilledLutWords, spilledLutWords.length);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof MultiEntryHelpersProgram other)) {
+                return false;
+            }
+            return java.util.Objects.equals(this.helpersSource, other.helpersSource)
+                    && java.util.Objects.equals(this.entryCallExprs, other.entryCallExprs)
+                    && java.util.Arrays.equals(this.spilledLutWords, other.spilledLutWords)
+                    && this.usedConstantBytes == other.usedConstantBytes
+                    && this.spilledLutCount == other.spilledLutCount
+                    && this.deduplicatedLutCount == other.deduplicatedLutCount;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + java.util.Objects.hashCode(this.helpersSource);
+            result = 31 * result + java.util.Objects.hashCode(this.entryCallExprs);
+            result = 31 * result + java.util.Arrays.hashCode(this.spilledLutWords);
+            result = 31 * result + this.usedConstantBytes;
+            result = 31 * result + this.spilledLutCount;
+            result = 31 * result + this.deduplicatedLutCount;
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "MultiEntryHelpersProgram[helpersSource=" + this.helpersSource
+                    + ", entryCallExprs=" + this.entryCallExprs
+                    + ", spilledLutWords=" + java.util.Arrays.toString(this.spilledLutWords)
+                    + ", usedConstantBytes=" + this.usedConstantBytes
+                    + ", spilledLutCount=" + this.spilledLutCount
+                    + ", deduplicatedLutCount=" + this.deduplicatedLutCount
+                    + "]";
+        }
+    }
+
+    /**
+     * Emits a self-contained OpenCL C99 device-helper preamble (pragmas, optional Q32 helpers,
+     * deduplicated LUTs, shared helpers, and multiple named entry functions) from one shared
+     * {@link ConceptModule}, returning call expressions keyed to {@code (bx, by, bz, gl_lut_spill)}
+     * for each requested function name in {@code entryFunctionNames}.
+     */
+    public MultiEntryHelpersProgram emitMultiEntryHelpers(
+            ConceptModule sharedModule,
+            List<String> entryFunctionNames,
+            EmitOptions options) {
+        Objects.requireNonNull(sharedModule, "sharedModule");
+        Objects.requireNonNull(entryFunctionNames, "entryFunctionNames");
+        Objects.requireNonNull(options, "options");
+        if (entryFunctionNames.isEmpty()) {
+            throw new IllegalArgumentException("emitMultiEntryHelpers requires at least one entry function name");
+        }
+        ConstantLutAllocator allocator = new ConstantLutAllocator(MAX_CONSTANT_BUDGET_BYTES, 0, "gl_lut_spill");
+        EmitOptions volumeOpts = options.withBatchLayout(BatchLayout.DENSITY_VOLUME_BATCH_F32);
+        GpuExactArithmeticMode arithmeticMode = volumeOpts.gpuExactArithmeticMode();
+
+        ConceptModule lowered = ConceptOptimizerPass.deduplicateLookupTables(sharedModule);
+        Q32LoweringPlan q32Plan = arithmeticMode.usesInt64Q32()
+                ? ConceptOptimizerPass.analyzeQ32Lowering(lowered)
+                : Q32LoweringPlan.empty();
+
+        Map<String, ConceptFunction> fnByKey = new LinkedHashMap<>();
+        Map<String, ConceptFunction> fnByName = new LinkedHashMap<>();
+        registerFunctionLookup(lowered, fnByKey, fnByName);
+        Map<String, Integer> callCountByFnName = countFunctionCallSites(lowered, fnByKey, fnByName);
+
+        StringBuilder sb = new StringBuilder(8192);
+        sb.append("// Auto-generated shared multi-entry OpenCL C99 helpers: ")
+                .append(lowered.moduleName())
+                .append('\n');
+        if (arithmeticMode == GpuExactArithmeticMode.NATIVE_FP64) {
+            sb.append("#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n");
+            sb.append("#pragma OPENCL FP_CONTRACT OFF\n\n");
+        } else if (arithmeticMode == GpuExactArithmeticMode.INT64_Q32_FP32) {
+            sb.append("// Floating-point mode: INT64_Q32_FP32 (64-bit Q32.32 coordinate arithmetic + FP32 interpolation)\n");
+            sb.append("#pragma OPENCL FP_CONTRACT OFF\n\n");
+            emitQ32Helpers(sb);
+            sb.append('\n');
+        } else {
+            sb.append("// Floating-point mode: DOWNCAST_FP32\n");
+            sb.append("#pragma OPENCL FP_CONTRACT OFF\n\n");
+        }
+
+        String prefix = "m_";
+        List<String> entryCallExprs = new ArrayList<>(entryFunctionNames.size());
+        EmitScope prevScope = ACTIVE_EMIT_SCOPE.get();
+        ACTIVE_EMIT_SCOPE.set(new EmitScope(
+                prefix,
+                allocator,
+                true,
+                callCountByFnName,
+                DiamondMemoPlan.EMPTY.fnNameToSlot(),
+                DiamondMemoPlan.EMPTY.keep2dMask(),
+                DiamondMemoPlan.EMPTY.elemType(),
+                null));
+        try {
+            for (ConceptLut lut : lowered.lookupTables()) {
+                if (arithmeticMode.usesInt64Q32()
+                        && lut.elementType() == ConceptType.F64
+                        && q32Plan.q32LutSymbol(lut.symbolName()) != null
+                        && !q32Plan.isFp32ReferencedLut(lut.symbolName())) {
+                    continue;
+                }
+                allocator.allocateAndEmit(sb, lut, volumeOpts, prefix);
+                sb.append('\n');
+            }
+            if (arithmeticMode.usesInt64Q32()) {
+                for (ConceptLut q32Lut : q32Plan.synthesizedQ32Luts()) {
+                    allocator.allocateAndEmit(sb, q32Lut, volumeOpts, prefix);
+                    sb.append('\n');
+                }
+            }
+            for (ConceptFunction helper : lowered.helperFunctions()) {
+                emitDeviceFunctionPrototype(sb, helper, volumeOpts, q32Plan);
+            }
+            emitDeviceFunctionPrototype(sb, lowered.entryFunction(), volumeOpts, q32Plan);
+            sb.append('\n');
+            for (ConceptFunction helper : lowered.helperFunctions()) {
+                emitDeviceFunction(sb, helper, volumeOpts, q32Plan, fnByKey, fnByName);
+                sb.append('\n');
+            }
+            emitDeviceFunction(sb, lowered.entryFunction(), volumeOpts, q32Plan, fnByKey, fnByName);
+            sb.append('\n');
+
+            for (String entryName : entryFunctionNames) {
+                ConceptFunction target = fnByName.get(entryName);
+                if (target == null) {
+                    throw new IllegalArgumentException(
+                            "emitMultiEntryHelpers entry function not found in module: " + entryName);
+                }
+                String rawCall = buildIntCoordTargetCall(target, "bx", "by", "bz", volumeOpts, q32Plan);
+                String callExpr = prefix + rawCall;
+                int closeParen = callExpr.lastIndexOf(')');
+                String beforeClose = callExpr.substring(0, closeParen);
+                String sep = beforeClose.endsWith("(") ? "" : ", ";
+                String fullCall = beforeClose + sep + "gl_lut_spill)";
+                if (arithmeticMode.usesInt64Q32() && q32Plan.isQ32Return(target)) {
+                    entryCallExprs.add("q32_to_f32(" + fullCall + ")");
+                } else {
+                    entryCallExprs.add("(float)(" + fullCall + ")");
+                }
+            }
+        } finally {
+            if (prevScope == null) {
+                ACTIVE_EMIT_SCOPE.remove();
+            } else {
+                ACTIVE_EMIT_SCOPE.set(prevScope);
+            }
+        }
+
+        return new MultiEntryHelpersProgram(
+                sb.toString(),
+                entryCallExprs,
+                allocator.spilledWordsArray(),
+                allocator.usedConstantBytes(),
+                allocator.spilledLutCount(),
+                allocator.deduplicatedLutCount());
+    }
+
+    private static void emitDeduplicatedModuleHelpers(
+            StringBuilder sb,
+            List<ConceptFunction> helpers,
+            String prefix,
+            EmitOptions options,
+            Q32LoweringPlan q32Plan,
+            Map<String, ConceptFunction> fnByKey,
+            Map<String, ConceptFunction> fnByName,
+            Map<String, String> canonicalHelperBodies) {
+        if (helpers.isEmpty()) {
+            return;
+        }
+        Map<String, String> localAliases = new LinkedHashMap<>();
+        StringBuilder definesSb = new StringBuilder();
+        StringBuilder protosSb = new StringBuilder();
+        StringBuilder bodiesSb = new StringBuilder();
+        for (ConceptFunction helper : helpers) {
+            String fullName = prefix + helper.name();
+            StringBuilder tmpBody = new StringBuilder(512);
+            emitDeviceFunction(tmpBody, helper, options, q32Plan, fnByKey, fnByName);
+            String bodyText = tmpBody.toString();
+
+            String canonical = bodyText.replaceAll(
+                    "(?<![A-Za-z0-9_])" + java.util.regex.Pattern.quote(fullName) + "\\(",
+                    "__SELF__(");
+            for (Map.Entry<String, String> alias : localAliases.entrySet()) {
+                canonical = canonical.replaceAll(
+                        "(?<![A-Za-z0-9_])" + java.util.regex.Pattern.quote(alias.getKey()) + "\\(",
+                        java.util.regex.Matcher.quoteReplacement(alias.getValue()) + "(");
+            }
+            String existing = canonicalHelperBodies.get(canonical);
+            if (existing != null) {
+                definesSb.append("#define ").append(fullName).append(' ').append(existing).append('\n');
+                localAliases.put(fullName, existing);
+            } else {
+                canonicalHelperBodies.put(canonical, fullName);
+                emitDeviceFunctionPrototype(protosSb, helper, options, q32Plan);
+                bodiesSb.append(bodyText).append('\n');
+            }
+        }
+        if (definesSb.length() > 0) {
+            sb.append(definesSb);
+        }
+        if (protosSb.length() > 0) {
+            sb.append(protosSb).append('\n');
+        }
+        if (bodiesSb.length() > 0) {
+            sb.append(bodiesSb);
+        }
+    }
+
+    private static String computeDensityVolumeDigest(
+            GpuExactArithmeticMode mode,
+            String sourceCode,
+            int[] spilledLutWords) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            md.update(mode.name().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            md.update((byte) '\n');
+            md.update(sourceCode.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            if (spilledLutWords != null && spilledLutWords.length > 0) {
+                byte[] buf = new byte[4];
+                for (int w : spilledLutWords) {
+                    buf[0] = (byte) (w >>> 24);
+                    buf[1] = (byte) (w >>> 16);
+                    buf[2] = (byte) (w >>> 8);
+                    buf[3] = (byte) w;
+                    md.update(buf);
+                }
+            }
+            byte[] hash = md.digest();
+            StringBuilder hex = new StringBuilder(hash.length * 2);
+            for (byte b : hash) {
+                hex.append(Character.forDigit((b >>> 4) & 0xF, 16));
+                hex.append(Character.forDigit(b & 0xF, 16));
+            }
+            return hex.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 MessageDigest unavailable", e);
         }
     }
 
@@ -471,6 +1470,17 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
             ConstantLutAllocator lutAllocator,
             boolean emitKernels,
             DiamondMemoPlan memoPlan) {
+        return emitWithAllocatorAndMemo(module, options, symbolPrefix, lutAllocator, emitKernels, memoPlan, null);
+    }
+
+    private TranspiledArtifact emitWithAllocatorAndMemo(
+            ConceptModule module,
+            EmitOptions options,
+            String symbolPrefix,
+            ConstantLutAllocator lutAllocator,
+            boolean emitKernels,
+            DiamondMemoPlan memoPlan,
+            CoarseInterpSpec coarseInterpSpec) {
         Objects.requireNonNull(module, "module");
         Objects.requireNonNull(options, "options");
         String effPrefix = symbolPrefix == null ? "" : symbolPrefix;
@@ -499,7 +1509,8 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
                 callCountByFnName,
                 effMemo.fnNameToSlot(),
                 effMemo.keep2dMask(),
-                effMemo.elemType()));
+                effMemo.elemType(),
+                coarseInterpSpec));
         try {
             StringBuilder sb = new StringBuilder(2048);
             sb.append("// Auto-generated OpenCL C99 kernel from JVM bytecode module: ")
@@ -987,6 +1998,8 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
             case SECTION_4096_VOXEL -> emitSection4096VoxelKernel(sb, spec, options, q32Plan);
             case SECTION_4096_LCA_NIBBLE_PACKED -> emitLcaPackedBatchKernel3D(sb, spec, options, q32Plan);
             case CORNER_SLICE_5X49_PACKED -> emitCornerSlice5x49PackedKernel(sb, spec, options, q32Plan);
+            case DENSITY_VOLUME_BATCH_F32 -> emitDensityVolumeBatchF32Kernel(sb, spec, options, q32Plan);
+            case SECTION_PALETTE_FILL_U2 -> emitSectionPaletteFillU2Kernel(sb, spec, options, q32Plan);
         }
     }
 
@@ -1361,6 +2374,330 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
                     .append("    out_lca_frames[s * 516 + tid] = as_uint(val);\n");
         }
         sb.append("}\n");
+    }
+
+    private static void emitDensityVolumeBatchF32Kernel(
+            StringBuilder sb,
+            ConceptBatchSpec spec,
+            EmitOptions options,
+            Q32LoweringPlan q32Plan) {
+        ConceptFunction target = spec.targetFunction();
+        EmitScope scope = ACTIVE_EMIT_SCOPE.get();
+        String prefix = scope != null ? scope.symbolPrefix() : "";
+        boolean passGlobalSpill = scope != null && scope.passGlobalSpillParam();
+        String spillBufName = (scope != null && scope.lutAllocator() != null
+                && scope.lutAllocator().globalSpillBufferName != null)
+                ? scope.lutAllocator().globalSpillBufferName
+                : "gl_lut_spill";
+        boolean q32Ret = options.gpuExactArithmeticMode().usesInt64Q32()
+                && q32Plan.isQ32Return(target);
+
+        sb.append("__kernel void ")
+                .append(spec.kernelName())
+                .append("(\n")
+                .append("    __global float* restrict out_values,\n")
+                .append("    __global const int4* restrict batch_origins,\n")
+                .append("    const int batch_count,\n")
+                .append("    const int size_x,\n")
+                .append("    const int size_y,\n")
+                .append("    const int size_z,\n")
+                .append("    const int step_x,\n")
+                .append("    const int step_y,\n")
+                .append("    const int step_z,\n")
+                .append("    __global const int* restrict ")
+                .append(spillBufName);
+        for (ConceptParam extra : spec.extraUniformParams()) {
+            sb.append(",\n    const ")
+                    .append(mapExtraUniformType(target, extra, options, q32Plan))
+                    .append(' ')
+                    .append(extra.name());
+        }
+        sb.append(")\n{\n")
+                .append("    const int gid = (int)get_global_id(0);\n")
+                .append("    const int volume_size = size_x * size_y * size_z;\n")
+                .append("    const int total_voxels = batch_count * volume_size;\n")
+                .append("    if (gid >= total_voxels) {\n")
+                .append("        return;\n")
+                .append("    }\n");
+        if (!passGlobalSpill) {
+            sb.append("    (void)").append(spillBufName).append(";\n");
+        }
+        sb.append("    const int batch_idx = gid / volume_size;\n")
+                .append("    const int voxel_idx = gid - batch_idx * volume_size;\n")
+                .append("    const int col_idx = voxel_idx / size_y;\n")
+                .append("    const int ly = voxel_idx - col_idx * size_y;\n")
+                .append("    const int lz = col_idx / size_x;\n")
+                .append("    const int lx = col_idx - lz * size_x;\n")
+                .append("    const int4 orig = batch_origins[batch_idx];\n")
+                .append("    const int bx = orig.x + lx * step_x;\n")
+                .append("    const int by = orig.y + ly * step_y;\n")
+                .append("    const int bz = orig.z + lz * step_z;\n");
+
+        String rawCall = buildIntCoordTargetCall(target, "bx", "by", "bz", options, q32Plan);
+        String callExpr = prefix.isEmpty() ? rawCall : prefix + rawCall;
+        if (passGlobalSpill) {
+            int closeParen = callExpr.lastIndexOf(')');
+            String beforeClose = callExpr.substring(0, closeParen);
+            String sep = beforeClose.endsWith("(") ? "" : ", ";
+            callExpr = beforeClose + sep + spillBufName + ")";
+        }
+        if (q32Ret) {
+            sb.append("    out_values[gid] = q32_to_f32(")
+                    .append(callExpr)
+                    .append(");\n");
+        } else {
+            sb.append("    out_values[gid] = (float)(")
+                    .append(callExpr)
+                    .append(");\n");
+        }
+        sb.append("}\n");
+    }
+
+    private static void emitSectionPaletteFillU2Kernel(
+            StringBuilder sb,
+            ConceptBatchSpec spec,
+            EmitOptions options,
+            Q32LoweringPlan q32Plan) {
+        ConceptFunction target = spec.targetFunction();
+        EmitScope scope = ACTIVE_EMIT_SCOPE.get();
+        String prefix = scope != null ? scope.symbolPrefix() : "";
+        boolean passGlobalSpill = scope != null && scope.passGlobalSpillParam();
+        String spillBufName = (scope != null && scope.lutAllocator() != null
+                && scope.lutAllocator().globalSpillBufferName != null)
+                ? scope.lutAllocator().globalSpillBufferName
+                : "gl_lut_spill";
+        CoarseInterpSpec coarseSpec = scope != null ? scope.coarseInterpSpec() : null;
+        boolean q32Ret = options.gpuExactArithmeticMode().usesInt64Q32()
+                && q32Plan.isQ32Return(target);
+
+        int coarseChannelCount = coarseSpec != null ? coarseSpec.coarseFunctionNames().size() : 0;
+        if (coarseSpec != null && spec.extraUniformParams().size() < coarseChannelCount) {
+            throw new IllegalArgumentException(
+                    "Entry function must declare at least " + coarseChannelCount
+                            + " coarse channel parameters after (x, y, z)");
+        }
+
+        sb.append("__kernel void ")
+                .append(spec.kernelName())
+                .append("(\n")
+                .append("    __global uint* restrict out_section_words,\n")
+                .append("    __global ushort4* restrict out_section_meta,\n")
+                .append("    __global const int4* restrict batch_origins,\n")
+                .append("    const int batch_count,\n")
+                .append("    const int section_count,\n")
+                .append("    const int sea_level,\n")
+                .append("    const int deep_fluid_y,\n")
+                .append("    __global const int* restrict ")
+                .append(spillBufName);
+        for (int i = coarseChannelCount; i < spec.extraUniformParams().size(); i++) {
+            ConceptParam extra = spec.extraUniformParams().get(i);
+            sb.append(",\n    const ")
+                    .append(mapExtraUniformType(target, extra, options, q32Plan))
+                    .append(' ')
+                    .append(extra.name());
+        }
+        sb.append(")\n{\n")
+                .append("    const int wg_id = (int)get_group_id(0);\n")
+                .append("    const int total_sections = batch_count * section_count;\n")
+                .append("    if (wg_id >= total_sections) {\n")
+                .append("        return;\n")
+                .append("    }\n");
+        if (!passGlobalSpill) {
+            sb.append("    (void)").append(spillBufName).append(";\n");
+        }
+        sb.append("    const int lid = (int)get_local_id(0);\n")
+                .append("    const int batch_idx = wg_id / section_count;\n")
+                .append("    const int section_idx = wg_id - batch_idx * section_count;\n")
+                .append("    const int lx = lid & 15;\n")
+                .append("    const int lz = lid >> 4;\n")
+                .append("    const int4 orig = batch_origins[batch_idx];\n")
+                .append("    const int bx = orig.x + lx;\n")
+                .append("    const int base_y = orig.y + (section_idx << 4);\n")
+                .append("    const int bz = orig.z + lz;\n")
+                .append("    const int section_word_base = wg_id << 8;\n")
+                .append("    __local uchar slice_codes[256];\n")
+                .append("    __local ushort red_non_empty[256];\n")
+                .append("    __local ushort red_fluid[256];\n")
+                .append("    __local uchar red_mask[256];\n");
+
+        String rawCall = buildIntCoordTargetCall(target, "bx", "by", "bz", options, q32Plan);
+        String callExpr = prefix.isEmpty() ? rawCall : prefix + rawCall;
+        if (passGlobalSpill) {
+            int closeParen = callExpr.lastIndexOf(')');
+            String beforeClose = callExpr.substring(0, closeParen);
+            String sep = beforeClose.endsWith("(") ? "" : ", ";
+            callExpr = beforeClose + sep + spillBufName + ")";
+        }
+
+        if (coarseSpec != null) {
+            int cellXz = coarseSpec.cellSizeXz();
+            int cellY = coarseSpec.cellSizeY();
+            int nx = coarseSpec.gridSizeXz();
+            int ny = coarseSpec.gridSizeY();
+            int nCoarse = coarseSpec.pointsPerChannel();
+            int totalCoarseTasks = coarseChannelCount * nCoarse;
+            int cellsY = 16 / cellY;
+            float invCellXz = 1.0f / (float) cellXz;
+            float invCellY = 1.0f / (float) cellY;
+
+            sb.append("    __local float coarse_vals[").append(totalCoarseTasks).append("];\n")
+                    .append("    for (int task = lid; task < ").append(totalCoarseTasks).append("; task += 256) {\n")
+                    .append("        const int ch = task / ").append(nCoarse).append(";\n")
+                    .append("        const int cidx = task - ch * ").append(nCoarse).append(";\n")
+                    .append("        const int cx = cidx % ").append(nx).append(";\n")
+                    .append("        const int ctmp = cidx / ").append(nx).append(";\n")
+                    .append("        const int cz = ctmp % ").append(nx).append(";\n")
+                    .append("        const int cy = ctmp / ").append(nx).append(";\n")
+                    .append("        const int gx = orig.x + cx * ").append(cellXz).append(";\n")
+                    .append("        const int gy = base_y + cy * ").append(cellY).append(";\n")
+                    .append("        const int gz = orig.z + cz * ").append(cellXz).append(";\n")
+                    .append("        float cval = 0.0f;\n")
+                    .append("        switch (ch) {\n");
+            for (int k = 0; k < coarseChannelCount; k++) {
+                String fnName = prefix + coarseSpec.coarseFunctionNames().get(k);
+                String coarseCall = passGlobalSpill
+                        ? fnName + "(gx, gy, gz, " + spillBufName + ")"
+                        : fnName + "(gx, gy, gz)";
+                sb.append("            case ").append(k).append(": cval = (float)(").append(coarseCall).append("); break;\n");
+            }
+            sb.append("            default: break;\n")
+                    .append("        }\n")
+                    .append("        coarse_vals[task] = cval;\n")
+                    .append("    }\n")
+                    .append("    barrier(CLK_LOCAL_MEM_FENCE);\n")
+                    .append("    const int col_cx = lx / ").append(cellXz).append(";\n")
+                    .append("    const int col_cz = lz / ").append(cellXz).append(";\n")
+                    .append("    const float col_fx = (float)(lx - col_cx * ").append(cellXz).append(") * ")
+                    .append(invCellXz).append("f;\n")
+                    .append("    const float col_fz = (float)(lz - col_cz * ").append(cellXz).append(") * ")
+                    .append(invCellXz).append("f;\n")
+                    .append("    ushort local_non_empty = 0;\n")
+                    .append("    ushort local_fluid = 0;\n")
+                    .append("    uchar local_mask = 0;\n")
+                    .append("    for (int cy = 0; cy < ").append(cellsY).append("; cy++) {\n")
+                    .append("        const int cell_base = (cy * ").append(nx).append(" + col_cz) * ")
+                    .append(nx).append(" + col_cx;\n");
+            int strideZ = nx;
+            int strideY = nx * nx;
+            for (int k = 0; k < coarseChannelCount; k++) {
+                int chOff = k * nCoarse;
+                sb.append("        const int cb_").append(k).append(" = ").append(chOff).append(" + cell_base;\n")
+                        .append("        const float c000_").append(k).append(" = coarse_vals[cb_").append(k).append("];\n")
+                        .append("        const float c100_").append(k).append(" = coarse_vals[cb_").append(k).append(" + 1];\n")
+                        .append("        const float c001_").append(k).append(" = coarse_vals[cb_").append(k).append(" + ").append(strideZ).append("];\n")
+                        .append("        const float c101_").append(k).append(" = coarse_vals[cb_").append(k).append(" + ").append(strideZ + 1).append("];\n")
+                        .append("        const float c010_").append(k).append(" = coarse_vals[cb_").append(k).append(" + ").append(strideY).append("];\n")
+                        .append("        const float c110_").append(k).append(" = coarse_vals[cb_").append(k).append(" + ").append(strideY + 1).append("];\n")
+                        .append("        const float c011_").append(k).append(" = coarse_vals[cb_").append(k).append(" + ").append(strideY + strideZ).append("];\n")
+                        .append("        const float c111_").append(k).append(" = coarse_vals[cb_").append(k).append(" + ").append(strideY + strideZ + 1).append("];\n")
+                        .append("        const float cz00_").append(k).append(" = c000_").append(k).append(" + col_fz * (c001_").append(k).append(" - c000_").append(k).append(");\n")
+                        .append("        const float cz01_").append(k).append(" = c010_").append(k).append(" + col_fz * (c011_").append(k).append(" - c010_").append(k).append(");\n")
+                        .append("        const float cz10_").append(k).append(" = c100_").append(k).append(" + col_fz * (c101_").append(k).append(" - c100_").append(k).append(");\n")
+                        .append("        const float cz11_").append(k).append(" = c110_").append(k).append(" + col_fz * (c111_").append(k).append(" - c110_").append(k).append(");\n")
+                        .append("        const float cx0_").append(k).append(" = cz00_").append(k).append(" + col_fx * (cz10_").append(k).append(" - cz00_").append(k).append(");\n")
+                        .append("        const float cx1_").append(k).append(" = cz01_").append(k).append(" + col_fx * (cz11_").append(k).append(" - cz01_").append(k).append(");\n")
+                        .append("        const float step_").append(k).append(" = (cx1_").append(k).append(" - cx0_").append(k).append(") * ")
+                        .append(invCellY).append("f;\n");
+            }
+            sb.append("        for (int sub_y = 0; sub_y < ").append(cellY).append("; sub_y++) {\n")
+                    .append("            const int ly = cy * ").append(cellY).append(" + sub_y;\n")
+                    .append("            const int by = base_y + ly;\n");
+            for (int k = 0; k < coarseChannelCount; k++) {
+                String paramName = spec.extraUniformParams().get(k).name();
+                sb.append("            const float ").append(paramName)
+                        .append(" = cx0_").append(k).append(" + step_").append(k).append(" * (float)sub_y;\n");
+            }
+            if (q32Ret) {
+                sb.append("            const float d = q32_to_f32(").append(callExpr).append(");\n");
+            } else {
+                sb.append("            const float d = (float)(").append(callExpr).append(");\n");
+            }
+            sb.append("            uchar code;\n")
+                    .append("            if (d > 0.0f) {\n")
+                    .append("                code = (uchar)1;\n")
+                    .append("                local_non_empty++;\n")
+                    .append("            } else if (by < deep_fluid_y) {\n")
+                    .append("                code = (uchar)3;\n")
+                    .append("                local_non_empty++;\n")
+                    .append("                local_fluid++;\n")
+                    .append("            } else if (by < sea_level) {\n")
+                    .append("                code = (uchar)2;\n")
+                    .append("                local_non_empty++;\n")
+                    .append("                local_fluid++;\n")
+                    .append("            } else {\n")
+                    .append("                code = (uchar)0;\n")
+                    .append("            }\n")
+                    .append("            local_mask |= (uchar)(1u << code);\n")
+                    .append("            slice_codes[lid] = code;\n")
+                    .append("            barrier(CLK_LOCAL_MEM_FENCE);\n")
+                    .append("            if (lid < 16) {\n")
+                    .append("                const int row_base = lid << 4;\n")
+                    .append("                uint packed = 0u;\n")
+                    .append("                for (int k = 0; k < 16; k++) {\n")
+                    .append("                    packed |= ((uint)slice_codes[row_base + k]) << (k << 1);\n")
+                    .append("                }\n")
+                    .append("                out_section_words[section_word_base + (ly << 4) + lid] = packed;\n")
+                    .append("            }\n")
+                    .append("            barrier(CLK_LOCAL_MEM_FENCE);\n")
+                    .append("        }\n")
+                    .append("    }\n");
+        } else {
+            sb.append("    ushort local_non_empty = 0;\n")
+                    .append("    ushort local_fluid = 0;\n")
+                    .append("    uchar local_mask = 0;\n")
+                    .append("    for (int ly = 0; ly < 16; ly++) {\n")
+                    .append("        const int by = base_y + ly;\n");
+
+            if (q32Ret) {
+                sb.append("        const float d = q32_to_f32(").append(callExpr).append(");\n");
+            } else {
+                sb.append("        const float d = (float)(").append(callExpr).append(");\n");
+            }
+            sb.append("        uchar code;\n")
+                    .append("        if (d > 0.0f) {\n")
+                    .append("            code = (uchar)1;\n")
+                    .append("            local_non_empty++;\n")
+                    .append("        } else if (by < deep_fluid_y) {\n")
+                    .append("            code = (uchar)3;\n")
+                    .append("            local_non_empty++;\n")
+                    .append("            local_fluid++;\n")
+                    .append("        } else if (by < sea_level) {\n")
+                    .append("            code = (uchar)2;\n")
+                    .append("            local_non_empty++;\n")
+                    .append("            local_fluid++;\n")
+                    .append("        } else {\n")
+                    .append("            code = (uchar)0;\n")
+                    .append("        }\n")
+                    .append("        local_mask |= (uchar)(1u << code);\n")
+                    .append("        slice_codes[lid] = code;\n")
+                    .append("        barrier(CLK_LOCAL_MEM_FENCE);\n")
+                    .append("        if (lid < 16) {\n")
+                    .append("            const int row_base = lid << 4;\n")
+                    .append("            uint packed = 0u;\n")
+                    .append("            for (int k = 0; k < 16; k++) {\n")
+                    .append("                packed |= ((uint)slice_codes[row_base + k]) << (k << 1);\n")
+                    .append("            }\n")
+                    .append("            out_section_words[section_word_base + (ly << 4) + lid] = packed;\n")
+                    .append("        }\n")
+                    .append("        barrier(CLK_LOCAL_MEM_FENCE);\n")
+                    .append("    }\n");
+        }
+        sb.append("    red_non_empty[lid] = local_non_empty;\n")
+                .append("    red_fluid[lid] = local_fluid;\n")
+                .append("    red_mask[lid] = local_mask;\n")
+                .append("    barrier(CLK_LOCAL_MEM_FENCE);\n")
+                .append("    for (int stride = 128; stride > 0; stride >>= 1) {\n")
+                .append("        if (lid < stride) {\n")
+                .append("            red_non_empty[lid] += red_non_empty[lid + stride];\n")
+                .append("            red_fluid[lid] += red_fluid[lid + stride];\n")
+                .append("            red_mask[lid] |= red_mask[lid + stride];\n")
+                .append("        }\n")
+                .append("        barrier(CLK_LOCAL_MEM_FENCE);\n")
+                .append("    }\n")
+                .append("    if (lid == 0) {\n")
+                .append("        out_section_meta[wg_id] = (ushort4)(red_non_empty[0], red_fluid[0], (ushort)red_mask[0], (ushort)0);\n")
+                .append("    }\n")
+                .append("}\n");
     }
 
     private static String buildIntCoordTargetCall(
@@ -2789,6 +4126,48 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
                         .append("] = ")
                         .append(emitExpr(store.value(), fn, options, q32Plan, fnByKey, fnByName, false))
                         .append(";\n");
+            } else if (stmt instanceof ConceptStmt.VoxelWrite vw) {
+                sb.append(indent)
+                        .append("leaf_voxel_write(")
+                        .append(emitExpr(vw.x(), fn, options, q32Plan, fnByKey, fnByName, false))
+                        .append(", ")
+                        .append(emitExpr(vw.y(), fn, options, q32Plan, fnByKey, fnByName, false))
+                        .append(", ")
+                        .append(emitExpr(vw.z(), fn, options, q32Plan, fnByKey, fnByName, false))
+                        .append(", ")
+                        .append(emitExpr(vw.slot(), fn, options, q32Plan, fnByKey, fnByName, false))
+                        .append(", ")
+                        .append(vw.flags())
+                        .append(");\n");
+            } else if (stmt instanceof ConceptStmt.MarkPostProcess mp) {
+                sb.append(indent)
+                        .append("leaf_mark_post_process(")
+                        .append(emitExpr(mp.x(), fn, options, q32Plan, fnByKey, fnByName, false))
+                        .append(", ")
+                        .append(emitExpr(mp.y(), fn, options, q32Plan, fnByKey, fnByName, false))
+                        .append(", ")
+                        .append(emitExpr(mp.z(), fn, options, q32Plan, fnByKey, fnByName, false))
+                        .append(");\n");
+            } else if (stmt instanceof ConceptStmt.BitSetWrite bsw) {
+                sb.append(indent)
+                        .append("leaf_bitset_write(")
+                        .append(bsw.setName())
+                        .append(", ")
+                        .append(emitExpr(bsw.index(), fn, options, q32Plan, fnByKey, fnByName, false))
+                        .append(", ")
+                        .append(emitExpr(bsw.value(), fn, options, q32Plan, fnByKey, fnByName, false))
+                        .append(");\n");
+            } else if (stmt instanceof ConceptStmt.PosSetAdd psa) {
+                sb.append(indent)
+                        .append("leaf_posset_add(")
+                        .append(psa.setName())
+                        .append(", ")
+                        .append(emitExpr(psa.x(), fn, options, q32Plan, fnByKey, fnByName, false))
+                        .append(", ")
+                        .append(emitExpr(psa.y(), fn, options, q32Plan, fnByKey, fnByName, false))
+                        .append(", ")
+                        .append(emitExpr(psa.z(), fn, options, q32Plan, fnByKey, fnByName, false))
+                        .append(");\n");
             }
         }
     }
@@ -2940,22 +4319,23 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
                 args.add(emitExpr(a, fn, options, q32Plan, fnByKey, fnByName, false));
             }
             boolean fp = math.type().isFloatingPoint();
+            boolean fastSfu = mode == GpuExactArithmeticMode.DOWNCAST_FP32;
             String fnName = switch (math.kind()) {
                 case FLOOR -> "floor";
                 case CEIL -> "ceil";
                 case ROUND -> "rint";
-                case SQRT -> "sqrt";
+                case SQRT -> fastSfu ? "native_sqrt" : "sqrt";
                 case ABS -> fp ? "fabs" : "abs";
-                case SIN -> "sin";
-                case COS -> "cos";
-                case TAN -> "tan";
+                case SIN -> fastSfu ? "native_sin" : "sin";
+                case COS -> fastSfu ? "native_cos" : "cos";
+                case TAN -> fastSfu ? "native_tan" : "tan";
                 case ATAN2 -> "atan2";
-                case EXP -> "exp";
-                case LOG -> "log";
+                case EXP -> fastSfu ? "native_exp" : "exp";
+                case LOG -> fastSfu ? "native_log" : "log";
                 case POW -> "pow";
                 case MIN -> fp ? "fmin" : "min";
                 case MAX -> fp ? "fmax" : "max";
-                case FMA -> "fma";
+                case FMA -> fastSfu ? "mad" : "fma";
                 case IS_FINITE -> "isfinite";
                 case IS_NAN -> "isnan";
                 case POPCOUNT -> "popcount";
@@ -3068,6 +4448,41 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
                 emitted = "(" + l + " " + bin.op().symbol() + " " + r + ")";
             }
             return expectQ32 ? convertToQ32(emitted, bin.type()) : emitted;
+        }
+        if (expr instanceof ConceptExpr.VoxelRead vr) {
+            return "leaf_voxel_read("
+                    + emitExpr(vr.x(), fn, options, q32Plan, fnByKey, fnByName, false) + ", "
+                    + emitExpr(vr.y(), fn, options, q32Plan, fnByKey, fnByName, false) + ", "
+                    + emitExpr(vr.z(), fn, options, q32Plan, fnByKey, fnByName, false) + ")";
+        }
+        if (expr instanceof ConceptExpr.HeightRead hr) {
+            return "leaf_height_read("
+                    + hr.heightKind() + ", "
+                    + emitExpr(hr.x(), fn, options, q32Plan, fnByKey, fnByName, false) + ", "
+                    + emitExpr(hr.z(), fn, options, q32Plan, fnByKey, fnByName, false) + ")";
+        }
+        if (expr instanceof ConceptExpr.BiomeRead br) {
+            return "leaf_biome_read("
+                    + emitExpr(br.x(), fn, options, q32Plan, fnByKey, fnByName, false) + ", "
+                    + emitExpr(br.y(), fn, options, q32Plan, fnByKey, fnByName, false) + ", "
+                    + emitExpr(br.z(), fn, options, q32Plan, fnByKey, fnByName, false) + ")";
+        }
+        if (expr instanceof ConceptExpr.BitSetRead bsr) {
+            return "leaf_bitset_read("
+                    + bsr.setName() + ", "
+                    + emitExpr(bsr.index(), fn, options, q32Plan, fnByKey, fnByName, false) + ")";
+        }
+        if (expr instanceof ConceptExpr.RngStep rng) {
+            String s0 = emitExpr(rng.state0(), fn, options, q32Plan, fnByKey, fnByName, false);
+            String s1 = emitExpr(rng.state1(), fn, options, q32Plan, fnByKey, fnByName, false);
+            String raw = "lcg48".equals(rng.kind())
+                    ? "(((" + s0 + ") * 25214903917L + 11L) & 281474976710655L)"
+                    : "((long)(rotate((ulong)((" + s0 + ") + (" + s1 + ")), (ulong)17UL) + (ulong)(" + s0 + ")))";
+            if (rng.bound() != null) {
+                String b = emitExpr(rng.bound(), fn, options, q32Plan, fnByKey, fnByName, false);
+                return "((int)((ulong)(" + raw + ") % (ulong)(" + b + ")))";
+            }
+            return raw;
         }
         throw new IllegalStateException("Unsupported ConceptExpr in OpenCL emitter: " + expr);
     }
@@ -3587,7 +5002,7 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
                       }
                       int diff = abs(lvl_a - lvl_b);
                       if (diff == 0) return 0.0f;
-                      float avg = 0.5f * (float)(lvl_a + lvl_b);
+                      float avg = 0.5f * (float)(lvl_a + lvl_b) + 1.0f;
                       float rel_y = (float)wy + 0.5f - avg;
                       float half_diff = (float)diff * 0.5f;
                       float dist_edge = half_diff - fabs(rel_y);
@@ -3640,7 +5055,7 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
                       int f1_wy = (slot1 > 0 && wy <= lvl1) ? slot1 : 0;
                       float sim12 = 1.0f - ((float)(d2 - d1) / sim_scale);
                       if (sim12 <= 0.0f) return f1_wy;
-                      if (f1_wy == default_fluid && default_fluid > 0 && lava_slot > 0 && (wy - 1) <= deep_lava_y) return lava_slot;
+                      if (f1_wy == default_fluid && default_fluid > 0 && lava_slot > 0 && (wy - 1) <= deep_lava_y) return f1_wy;
                       int cb2 = i2 * 5;
                       int lvl2 = (int)cells[cb2 + 3];
                       int slot2 = (int)cells[cb2 + 4];
@@ -4651,6 +6066,25 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
             ConstantLutAllocator sharedAllocator,
             boolean enableDiamondMemo
     ) {
+        return emitFinalDensityDeviceSectionWithPlan(
+                finalDensityModule,
+                effPolicy,
+                effExactMode,
+                sharedAllocator,
+                enableDiamondMemo,
+                "fd_",
+                "eval_lifted_final_density_ir");
+    }
+
+    private static FinalDensitySectionResult emitFinalDensityDeviceSectionWithPlan(
+            ConceptModule finalDensityModule,
+            WorldgenKernelSwapper.WorldgenFidelityPolicy effPolicy,
+            WorldgenKernelSwapper.GpuExactArithmeticMode effExactMode,
+            ConstantLutAllocator sharedAllocator,
+            boolean enableDiamondMemo,
+            String symbolPrefix,
+            String evalFnBaseName
+    ) {
         StringBuilder sb = new StringBuilder(1024);
         boolean exactMode = effPolicy != null && effPolicy.isExact();
         boolean useNativeFp64 = exactMode
@@ -4664,14 +6098,14 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
                 || finalDensityModule.entryFunction() == null
                 || !finalDensityModule.isPureCompute()
                 || !finalDensityModule.unmappedReasons().isEmpty()) {
-            sb.append("inline float eval_lifted_final_density_ir(int bx, int by, int bz").append(spillParam).append(") {\n")
+            sb.append("inline float ").append(evalFnBaseName).append("(int bx, int by, int bz").append(spillParam).append(") {\n")
                     .append("    (void)bx; (void)by; (void)bz;")
                     .append(passSpill ? (" (void)" + sharedAllocator.globalSpillBufferName + ";") : "")
                     .append("\n    return 0.0f;\n")
                     .append("}\n");
             if (useNativeFp64) {
                 sb.append("#if defined(LEAFGEN_EXACT_NATIVE_FP64) && defined(cl_khr_fp64)\n")
-                        .append("inline double eval_lifted_final_density_ir_f64(int bx, int by, int bz").append(spillParam).append(") {\n")
+                        .append("inline double ").append(evalFnBaseName).append("_f64(int bx, int by, int bz").append(spillParam).append(") {\n")
                         .append("    (void)bx; (void)by; (void)bz;")
                         .append(passSpill ? (" (void)" + sharedAllocator.globalSpillBufferName + ";") : "")
                         .append("\n    return 0.0;\n")
@@ -4702,7 +6136,7 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
                 ? analyzeDiamondMemoPlan(preOptForMemo, arithMode, preQ32Plan)
                 : DiamondMemoPlan.EMPTY;
         TranspiledArtifact artifact = new OpenClBackendEmitter()
-                .emitWithAllocatorAndMemo(preOptForMemo, emitOpts, "fd_", sharedAllocator, false, memoPlan);
+                .emitWithAllocatorAndMemo(preOptForMemo, emitOpts, symbolPrefix, sharedAllocator, false, memoPlan);
         ConceptModule lowered = artifact.optimizedModule();
         Q32LoweringPlan q32Plan = arithMode.usesInt64Q32()
                 ? ConceptOptimizerPass.analyzeQ32Lowering(lowered)
@@ -4758,10 +6192,10 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
             }
             callArgs.append("memo_mask, memo_val");
         }
-        String rawCall = "fd_" + entry.name() + "(" + callArgs + ")";
+        String rawCall = symbolPrefix + entry.name() + "(" + callArgs + ")";
         boolean returnsQ32 = arithMode.usesInt64Q32() && q32Plan.isQ32Return(entry);
         String floatCall = returnsQ32 ? ("q32_to_f32(" + rawCall + ")") : ("(float)(" + rawCall + ")");
-        sb.append("inline float eval_lifted_final_density_ir(int bx, int by, int bz")
+        sb.append("inline float ").append(evalFnBaseName).append("(int bx, int by, int bz")
                 .append(spillParam)
                 .append(memoParams)
                 .append(") {\n")
@@ -4772,7 +6206,7 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
                 .append("}\n");
         if (useNativeFp64) {
             sb.append("#if defined(LEAFGEN_EXACT_NATIVE_FP64) && defined(cl_khr_fp64)\n")
-                    .append("inline double eval_lifted_final_density_ir_f64(int bx, int by, int bz")
+                    .append("inline double ").append(evalFnBaseName).append("_f64(int bx, int by, int bz")
                     .append(spillParam)
                     .append(memoParams)
                     .append(") {\n")
@@ -4860,16 +6294,106 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
         int cellsZPre = Math.max(1, (16 + cellWPre - 1) / cellWPre);
         int cellsYPre = Math.max(1, Math.max(1, spec.noiseHeight()) / cellHPre);
         int cols2dPre = (cellsXPre + 1) * (cellsZPre + 1);
-        boolean gpuCornersSupported = spec.hasFinalDensityModule()
-                && (cols2dPre * (cellsYPre + 1)) <= 4096;
-        FinalDensitySectionResult fdRes = emitFinalDensityDeviceSectionWithPlan(
-                spec.finalDensityModule(),
-                effPolicy,
-                effExactMode,
-                sharedLutAllocator,
-                gpuCornersSupported && cols2dPre <= 256);
-        String finalDensityIrSrc = fdRes.sourceCode();
-        DiamondMemoPlan memoPlan = fdRes.memoPlan();
+        int cornersPerChunkPre = cols2dPre * (cellsYPre + 1);
+        LiftedWorldgenCapabilityTables.InterpolatedDensityGpuPlan gpuInterpPlan =
+                spec.hasInterpolatedDensityGpuPlan() ? spec.interpolatedDensityGpuPlan() : null;
+        int interpChCount = gpuInterpPlan != null ? gpuInterpPlan.channelModules().length : 0;
+        boolean multiInterpGpuSupported = gpuInterpPlan != null
+                && interpChCount > 0
+                && cornersPerChunkPre <= 4096
+                && (interpChCount * cornersPerChunkPre * (useNativeFp64 ? 8 : 4)) <= 28672;
+        boolean gpuCornersSupported = multiInterpGpuSupported
+                || (spec.hasFinalDensityModule() && cornersPerChunkPre <= 4096);
+        String finalDensityIrSrc;
+        DiamondMemoPlan memoPlan;
+        if (multiInterpGpuSupported) {
+            StringBuilder multiFdSb = new StringBuilder(4096);
+            multiFdSb.append("inline float leaf_squeeze_f32(float v) { float c = clamp(v, -1.0f, 1.0f); return c * 0.5f - (c * c * c) / 24.0f; }\n")
+                    .append("inline float leaf_mojang_beard_kernel(int dx, int dy, int dz, int dy_ground) {\n")
+                    .append("    if (dx < -12 || dx >= 12 || dy < -12 || dy >= 12 || dz < -12 || dz >= 12) return 0.0f;\n")
+                    .append("    float y = (float)dy_ground + 0.5f;\n")
+                    .append("    float d2 = (float)(dx * dx + dz * dz) + y * y;\n")
+                    .append("    float dyk = (float)dy + 0.5f;\n")
+                    .append("    float kd2 = (float)(dx * dx + dz * dz) + dyk * dyk;\n")
+                    .append("    return (-y * rsqrt(2.0f * d2)) * exp(-kd2 * 0.0625f);\n")
+                    .append("}\n")
+                    .append("inline float leaf_mojang_bury(float dx, float dy, float dz) {\n")
+                    .append("    float len = sqrt(dx * dx + dy * dy + dz * dz);\n")
+                    .append("    return clamp(1.0f - len * (1.0f / 6.0f), 0.0f, 1.0f);\n")
+                    .append("}\n")
+                    .append("inline float eval_mojang_beard_voxel(")
+                    .append(openClGlobalPtrParam("float", true, "packed_f"))
+                    .append(", int bx, int by, int bz) {\n")
+                    .append("    int count = (int)packed_f[0];\n")
+                    .append("    float sum = 0.0f;\n")
+                    .append("    for (int i = 0; i < count; i++) {\n")
+                    .append("        int p = 1 + (i << 3);\n")
+                    .append("        int t_adj = (int)packed_f[p + 6];\n")
+                    .append("        if (t_adj == 0) continue;\n")
+                    .append("        int min_x = (int)packed_f[p];\n")
+                    .append("        int raw_min_y = (int)packed_f[p + 1];\n")
+                    .append("        int min_z = (int)packed_f[p + 2];\n")
+                    .append("        int max_x = (int)packed_f[p + 3];\n")
+                    .append("        int max_y = (int)packed_f[p + 4];\n")
+                    .append("        int max_z = (int)packed_f[p + 5];\n")
+                    .append("        int g_delta = (int)packed_f[p + 7];\n")
+                    .append("        if (t_adj == 5) {\n")
+                    .append("            int jdx = bx - min_x;\n")
+                    .append("            int jdy = by - raw_min_y;\n")
+                    .append("            int jdz = bz - min_z;\n")
+                    .append("            sum += leaf_mojang_beard_kernel(jdx, jdy, jdz, jdy) * 0.4f;\n")
+                    .append("            continue;\n")
+                    .append("        }\n")
+                    .append("        int dx = max(0, max(min_x - bx, bx - max_x));\n")
+                    .append("        int dz = max(0, max(min_z - bz, bz - max_z));\n")
+                    .append("        int ground_y = raw_min_y + g_delta;\n")
+                    .append("        int dy_ground = by - ground_y;\n")
+                    .append("        if (t_adj == 1) {\n")
+                    .append("            sum += leaf_mojang_bury((float)dx, (float)dy_ground * 0.5f, (float)dz);\n")
+                    .append("        } else if (t_adj == 2) {\n")
+                    .append("            sum += leaf_mojang_beard_kernel(dx, dy_ground, dz, dy_ground) * 0.8f;\n")
+                    .append("        } else if (t_adj == 3) {\n")
+                    .append("            int dy_box = max(0, max(ground_y - by, by - max_y));\n")
+                    .append("            sum += leaf_mojang_beard_kernel(dx, dy_box, dz, dy_ground) * 0.8f;\n")
+                    .append("        } else if (t_adj == 4) {\n")
+                    .append("            int dy_enc = max(0, max(raw_min_y - by, by - max_y));\n")
+                    .append("            sum += leaf_mojang_bury((float)dx * 0.5f, (float)dy_enc * 0.5f, (float)dz * 0.5f) * 0.8f;\n")
+                    .append("        }\n")
+                    .append("    }\n")
+                    .append("    return sum;\n")
+                    .append("}\n");
+            if (useNativeFp64) {
+                multiFdSb.append("#if defined(LEAFGEN_EXACT_NATIVE_FP64) && defined(cl_khr_fp64)\n")
+                        .append("inline double leaf_squeeze_f64(double v) { double c = clamp(v, -1.0, 1.0); return c * 0.5 - (c * c * c) / 24.0; }\n")
+                        .append("#endif\n");
+            }
+            DiamondMemoPlan ch0Memo = DiamondMemoPlan.EMPTY;
+            for (int ch = 0; ch < interpChCount; ch++) {
+                FinalDensitySectionResult chRes = emitFinalDensityDeviceSectionWithPlan(
+                        gpuInterpPlan.channelModules()[ch],
+                        effPolicy,
+                        effExactMode,
+                        sharedLutAllocator,
+                        ch == 0 && cols2dPre <= 256,
+                        "fd_ch" + ch + "_",
+                        "eval_lifted_interp_ch_" + ch);
+                multiFdSb.append(chRes.sourceCode());
+                if (ch == 0) {
+                    ch0Memo = chRes.memoPlan();
+                }
+            }
+            finalDensityIrSrc = multiFdSb.toString();
+            memoPlan = ch0Memo;
+        } else {
+            FinalDensitySectionResult fdRes = emitFinalDensityDeviceSectionWithPlan(
+                    spec.finalDensityModule(),
+                    effPolicy,
+                    effExactMode,
+                    sharedLutAllocator,
+                    gpuCornersSupported && cols2dPre <= 256);
+            finalDensityIrSrc = fdRes.sourceCode();
+            memoPlan = fdRes.memoPlan();
+        }
         String surfaceRuleIrSrc = emitSurfaceRuleDeviceSection(
                 spec.surfaceRuleModule(), effPolicy, effExactMode, sharedLutAllocator);
         int barrierNoiseId = noiseIds6[0];
@@ -4971,15 +6495,23 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
                 + "    __local int s_raw_top_y[256];\n"
                 + "    __local int s_prelim_y[256];\n"
                 + "    __local int s_layer_vox[256];\n"
-                + (gpuCornersSupported
-                        ? ((useNativeFp64 && cornersPerChunk <= 2048)
+                + (multiInterpGpuSupported
+                        ? ((useNativeFp64 && (interpChCount * cornersPerChunk * 8) <= 28672)
                                 ? ("#if defined(LEAFGEN_EXACT_NATIVE_FP64) && defined(cl_khr_fp64)\n"
-                                        + "    __local double s_corners[" + cornersPerChunk + "];\n"
+                                        + "    __local double s_interp_ch[" + (interpChCount * cornersPerChunk) + "];\n"
                                         + "#else\n"
-                                        + "    __local float s_corners[" + cornersPerChunk + "];\n"
+                                        + "    __local float s_interp_ch[" + (interpChCount * cornersPerChunk) + "];\n"
                                         + "#endif\n")
-                                : ("    __local float s_corners[" + cornersPerChunk + "];\n"))
-                        : "")
+                                : ("    __local float s_interp_ch[" + (interpChCount * cornersPerChunk) + "];\n"))
+                        : (gpuCornersSupported
+                                ? ((useNativeFp64 && cornersPerChunk <= 2048)
+                                        ? ("#if defined(LEAFGEN_EXACT_NATIVE_FP64) && defined(cl_khr_fp64)\n"
+                                                + "    __local double s_corners[" + cornersPerChunk + "];\n"
+                                                + "#else\n"
+                                                + "    __local float s_corners[" + cornersPerChunk + "];\n"
+                                                + "#endif\n")
+                                        : ("    __local float s_corners[" + cornersPerChunk + "];\n"))
+                                : ""))
                 + "    __local int s_est_basin_floor;\n"
                 + "    __local int s_chunk_active_top_y;\n"
                 + (carverCount > 0
@@ -5079,82 +6611,85 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
                 + "    for (int vi = col; vi < total_voxels; vi += 256) {\n"
                 + "        c_out_sections[vi] = 0;\n"
                 + "    }\n"
-                + (gpuCornersSupported
-                        ? ((memoPlan.isActive()
-                                ? ("    if (has_gpu_corners != 0) {\n"
-                                        + "        int bands_per_col = 256 / " + cols2dPre + ";\n"
-                                        + "        if (bands_per_col < 1) bands_per_col = 1;\n"
-                                        + "        int active_threads = " + cols2dPre + " * bands_per_col;\n"
-                                        + "        if (col < active_threads) {\n"
-                                        + "            int col2d = col / bands_per_col;\n"
-                                        + "            int band_y = col - col2d * bands_per_col;\n"
-                                        + "            int gx_c = col2d / " + (cellsZ + 1) + ";\n"
-                                        + "            int gz_c = col2d - gx_c * " + (cellsZ + 1) + ";\n"
-                                        + "            int c_bx = (chunk_x << 4) + gx_c * cell_w;\n"
-                                        + "            int c_bz = (chunk_z << 4) + gz_c * cell_w;\n"
-                                        + "            int y_per_band = (" + strideZ + " + bands_per_col - 1) / bands_per_col;\n"
-                                        + "            int gy_start = band_y * y_per_band;\n"
-                                        + "            int gy_end = gy_start + y_per_band;\n"
-                                        + "            if (gy_end > " + strideZ + ") gy_end = " + strideZ + ";\n"
-                                        + "            uint memo_mask = 0u;\n"
-                                        + "            " + memoPlan.elemType() + " memo_val[" + memoPlan.slotCount() + "];\n"
-                                        + "            int base_ci = gx_c * stride_x + gz_c * stride_z;\n"
-                                        + "            for (int gy_c = gy_start; gy_c < gy_end; gy_c++) {\n"
-                                        + "                memo_mask &= " + Integer.toUnsignedString(memoPlan.keep2dMask()) + "u;\n"
-                                        + "                int c_by = noise_min_y + gy_c * cell_h;\n"
-                                        + "                int ci_pos = base_ci + gy_c;\n"
-                                        + ((useNativeFp64 && cornersPerChunk <= 2048)
-                                                ? ("#if defined(LEAFGEN_EXACT_NATIVE_FP64) && defined(cl_khr_fp64)\n"
-                                                        + "                double cv = eval_lifted_final_density_ir_f64(c_bx, c_by, c_bz, rule_ops, &memo_mask, memo_val);\n"
-                                                        + "                if (add_beard_delta != 0) cv += (double)c_corners[ci_pos];\n"
-                                                        + "                s_corners[ci_pos] = cv;\n"
-                                                        + "#else\n"
-                                                        + "                float cv = eval_lifted_final_density_ir(c_bx, c_by, c_bz, rule_ops, &memo_mask, memo_val);\n"
-                                                        + "                if (add_beard_delta != 0) cv += c_corners[ci_pos];\n"
-                                                        + "                s_corners[ci_pos] = cv;\n"
-                                                        + "#endif\n")
-                                                : ("                float cv = eval_lifted_final_density_ir(c_bx, c_by, c_bz, rule_ops, &memo_mask, memo_val);\n"
-                                                        + "                if (add_beard_delta != 0) cv += c_corners[ci_pos];\n"
-                                                        + "                s_corners[ci_pos] = cv;\n"))
-                                        + "            }\n"
-                                        + "        }\n"
-                                        + "    } else {\n")
-                                : ("    if (has_gpu_corners != 0) {\n"
+                + (multiInterpGpuSupported
+                        ? emitMultiInterpGpuCornerFill(
+                                interpChCount, cornersPerChunk, cols2dPre, cellsZ, strideZ, useNativeFp64, memoPlan)
+                        : (gpuCornersSupported
+                                ? ((memoPlan.isActive()
+                                        ? ("    if (has_gpu_corners != 0) {\n"
+                                                + "        int bands_per_col = 256 / " + cols2dPre + ";\n"
+                                                + "        if (bands_per_col < 1) bands_per_col = 1;\n"
+                                                + "        int active_threads = " + cols2dPre + " * bands_per_col;\n"
+                                                + "        if (col < active_threads) {\n"
+                                                + "            int col2d = col / bands_per_col;\n"
+                                                + "            int band_y = col - col2d * bands_per_col;\n"
+                                                + "            int gx_c = col2d / " + (cellsZ + 1) + ";\n"
+                                                + "            int gz_c = col2d - gx_c * " + (cellsZ + 1) + ";\n"
+                                                + "            int c_bx = (chunk_x << 4) + gx_c * cell_w;\n"
+                                                + "            int c_bz = (chunk_z << 4) + gz_c * cell_w;\n"
+                                                + "            int y_per_band = (" + strideZ + " + bands_per_col - 1) / bands_per_col;\n"
+                                                + "            int gy_start = band_y * y_per_band;\n"
+                                                + "            int gy_end = gy_start + y_per_band;\n"
+                                                + "            if (gy_end > " + strideZ + ") gy_end = " + strideZ + ";\n"
+                                                + "            uint memo_mask = 0u;\n"
+                                                + "            " + memoPlan.elemType() + " memo_val[" + memoPlan.slotCount() + "];\n"
+                                                + "            int base_ci = gx_c * stride_x + gz_c * stride_z;\n"
+                                                + "            for (int gy_c = gy_start; gy_c < gy_end; gy_c++) {\n"
+                                                + "                memo_mask &= " + Integer.toUnsignedString(memoPlan.keep2dMask()) + "u;\n"
+                                                + "                int c_by = noise_min_y + gy_c * cell_h;\n"
+                                                + "                int ci_pos = base_ci + gy_c;\n"
+                                                + ((useNativeFp64 && cornersPerChunk <= 2048)
+                                                        ? ("#if defined(LEAFGEN_EXACT_NATIVE_FP64) && defined(cl_khr_fp64)\n"
+                                                                + "                double cv = eval_lifted_final_density_ir_f64(c_bx, c_by, c_bz, rule_ops, &memo_mask, memo_val);\n"
+                                                                + "                if (add_beard_delta != 0) cv += (double)c_corners[ci_pos];\n"
+                                                                + "                s_corners[ci_pos] = cv;\n"
+                                                                + "#else\n"
+                                                                + "                float cv = eval_lifted_final_density_ir(c_bx, c_by, c_bz, rule_ops, &memo_mask, memo_val);\n"
+                                                                + "                if (add_beard_delta != 0) cv += c_corners[ci_pos];\n"
+                                                                + "                s_corners[ci_pos] = cv;\n"
+                                                                + "#endif\n")
+                                                        : ("                float cv = eval_lifted_final_density_ir(c_bx, c_by, c_bz, rule_ops, &memo_mask, memo_val);\n"
+                                                                + "                if (add_beard_delta != 0) cv += c_corners[ci_pos];\n"
+                                                                + "                s_corners[ci_pos] = cv;\n"))
+                                                + "            }\n"
+                                                + "        }\n"
+                                                + "    } else {\n")
+                                        : ("    if (has_gpu_corners != 0) {\n"
+                                                + "        for (int ci = col; ci < " + cornersPerChunk + "; ci += 256) {\n"
+                                                + "            int gx_c = ci / stride_x;\n"
+                                                + "            int rem_c = ci - gx_c * stride_x;\n"
+                                                + "            int gz_c = rem_c / stride_z;\n"
+                                                + "            int gy_c = rem_c - gz_c * stride_z;\n"
+                                                + "            int c_bx = (chunk_x << 4) + gx_c * cell_w;\n"
+                                                + "            int c_by = noise_min_y + gy_c * cell_h;\n"
+                                                + "            int c_bz = (chunk_z << 4) + gz_c * cell_w;\n"
+                                                + ((useNativeFp64 && cornersPerChunk <= 2048)
+                                                        ? ("#if defined(LEAFGEN_EXACT_NATIVE_FP64) && defined(cl_khr_fp64)\n"
+                                                                + "            double cv = eval_lifted_final_density_ir_f64(c_bx, c_by, c_bz, rule_ops);\n"
+                                                                + "            if (add_beard_delta != 0) cv += (double)c_corners[ci];\n"
+                                                                + "            s_corners[ci] = cv;\n"
+                                                                + "#else\n"
+                                                                + "            float cv = eval_lifted_final_density_ir(c_bx, c_by, c_bz, rule_ops);\n"
+                                                                + "            if (add_beard_delta != 0) cv += c_corners[ci];\n"
+                                                                + "            s_corners[ci] = cv;\n"
+                                                                + "#endif\n")
+                                                        : ("            float cv = eval_lifted_final_density_ir(c_bx, c_by, c_bz, rule_ops);\n"
+                                                                + "            if (add_beard_delta != 0) cv += c_corners[ci];\n"
+                                                                + "            s_corners[ci] = cv;\n"))
+                                                + "        }\n"
+                                                + "    } else {\n"))
                                         + "        for (int ci = col; ci < " + cornersPerChunk + "; ci += 256) {\n"
-                                        + "            int gx_c = ci / stride_x;\n"
-                                        + "            int rem_c = ci - gx_c * stride_x;\n"
-                                        + "            int gz_c = rem_c / stride_z;\n"
-                                        + "            int gy_c = rem_c - gz_c * stride_z;\n"
-                                        + "            int c_bx = (chunk_x << 4) + gx_c * cell_w;\n"
-                                        + "            int c_by = noise_min_y + gy_c * cell_h;\n"
-                                        + "            int c_bz = (chunk_z << 4) + gz_c * cell_w;\n"
                                         + ((useNativeFp64 && cornersPerChunk <= 2048)
                                                 ? ("#if defined(LEAFGEN_EXACT_NATIVE_FP64) && defined(cl_khr_fp64)\n"
-                                                        + "            double cv = eval_lifted_final_density_ir_f64(c_bx, c_by, c_bz, rule_ops);\n"
-                                                        + "            if (add_beard_delta != 0) cv += (double)c_corners[ci];\n"
-                                                        + "            s_corners[ci] = cv;\n"
+                                                        + "            s_corners[ci] = (double)c_corners[ci];\n"
                                                         + "#else\n"
-                                                        + "            float cv = eval_lifted_final_density_ir(c_bx, c_by, c_bz, rule_ops);\n"
-                                                        + "            if (add_beard_delta != 0) cv += c_corners[ci];\n"
-                                                        + "            s_corners[ci] = cv;\n"
+                                                        + "            s_corners[ci] = c_corners[ci];\n"
                                                         + "#endif\n")
-                                                : ("            float cv = eval_lifted_final_density_ir(c_bx, c_by, c_bz, rule_ops);\n"
-                                                        + "            if (add_beard_delta != 0) cv += c_corners[ci];\n"
-                                                        + "            s_corners[ci] = cv;\n"))
+                                                : "            s_corners[ci] = c_corners[ci];\n")
                                         + "        }\n"
-                                        + "    } else {\n"))
-                                + "        for (int ci = col; ci < " + cornersPerChunk + "; ci += 256) {\n"
-                                + ((useNativeFp64 && cornersPerChunk <= 2048)
-                                        ? ("#if defined(LEAFGEN_EXACT_NATIVE_FP64) && defined(cl_khr_fp64)\n"
-                                                + "            s_corners[ci] = (double)c_corners[ci];\n"
-                                                + "#else\n"
-                                                + "            s_corners[ci] = c_corners[ci];\n"
-                                                + "#endif\n")
-                                        : "            s_corners[ci] = c_corners[ci];\n")
-                                + "        }\n"
-                                + "    }\n"
-                                + "    barrier(CLK_LOCAL_MEM_FENCE);\n")
-                        : "    (void)has_gpu_corners; (void)add_beard_delta;\n")
+                                        + "    }\n"
+                                        + "    barrier(CLK_LOCAL_MEM_FENCE);\n")
+                                : "    (void)has_gpu_corners; (void)add_beard_delta;\n"))
                 + (includeGpuRtree
                         ? ("    if (skip_biome_io == 0 && has_quart_climate != 0 && rtree_node_count > 0) {\n"
                                 + "        int q_slice_stride = (has_halo_6x6 != 0) ? 36 : 16;\n"
@@ -5209,110 +6744,119 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
                 + "        int c10 = (gx + 1) * stride_x + gz * stride_z + cy;\n"
                 + "        int c01 = gx * stride_x + (gz + 1) * stride_z + cy;\n"
                 + "        int c11 = (gx + 1) * stride_x + (gz + 1) * stride_z + cy;\n"
-                + (gpuCornersSupported
-                        ? ((useNativeFp64 && cornersPerChunk <= 2048)
-                                ? ("#if defined(LEAFGEN_EXACT_NATIVE_FP64) && defined(cl_khr_fp64)\n"
-                                        + "        double v000 = s_corners[c00], v001 = s_corners[c00 + 1];\n"
-                                        + "        double v100 = s_corners[c10], v101 = s_corners[c10 + 1];\n"
-                                        + "        double v010 = s_corners[c01], v011 = s_corners[c01 + 1];\n"
-                                        + "        double v110 = s_corners[c11], v111 = s_corners[c11 + 1];\n"
+                + (multiInterpGpuSupported
+                        ? emitMultiInterpGpuCellEval(
+                                interpChCount,
+                                cornersPerChunk,
+                                gpuInterpPlan.openClCombinerExprF32(),
+                                gpuInterpPlan.openClCombinerExprF64(),
+                                exactMode,
+                                useNativeFp64,
+                                useHybridSignBand)
+                        : ((gpuCornersSupported
+                                ? ((useNativeFp64 && cornersPerChunk <= 2048)
+                                        ? ("#if defined(LEAFGEN_EXACT_NATIVE_FP64) && defined(cl_khr_fp64)\n"
+                                                + "        double v000 = s_corners[c00], v001 = s_corners[c00 + 1];\n"
+                                                + "        double v100 = s_corners[c10], v101 = s_corners[c10 + 1];\n"
+                                                + "        double v010 = s_corners[c01], v011 = s_corners[c01 + 1];\n"
+                                                + "        double v110 = s_corners[c11], v111 = s_corners[c11 + 1];\n"
+                                                + "#else\n"
+                                                + "        float v000 = s_corners[c00], v001 = s_corners[c00 + 1];\n"
+                                                + "        float v100 = s_corners[c10], v101 = s_corners[c10 + 1];\n"
+                                                + "        float v010 = s_corners[c01], v011 = s_corners[c01 + 1];\n"
+                                                + "        float v110 = s_corners[c11], v111 = s_corners[c11 + 1];\n"
+                                                + "#endif\n")
+                                        : ("        float v000 = s_corners[c00], v001 = s_corners[c00 + 1];\n"
+                                                + "        float v100 = s_corners[c10], v101 = s_corners[c10 + 1];\n"
+                                                + "        float v010 = s_corners[c01], v011 = s_corners[c01 + 1];\n"
+                                                + "        float v110 = s_corners[c11], v111 = s_corners[c11 + 1];\n"))
+                                : ("        float v000 = c_corners[c00], v001 = c_corners[c00 + 1];\n"
+                                        + "        float v100 = c_corners[c10], v101 = c_corners[c10 + 1];\n"
+                                        + "        float v010 = c_corners[c01], v011 = c_corners[c01 + 1];\n"
+                                        + "        float v110 = c_corners[c11], v111 = c_corners[c11 + 1];\n"))
+                        + "        int cell_base_y = noise_min_y + cy * cell_h;\n"
+                        + (!exactMode
+                                ? ("        float min_c = fmin(fmin(fmin(v000, v001), fmin(v100, v101)), fmin(fmin(v010, v011), fmin(v110, v111)));\n"
+                                        + "        float max_c = fmax(fmax(fmax(v000, v001), fmax(v100, v101)), fmax(fmax(v010, v011), fmax(v110, v111)));\n"
+                                        + "        if (min_c > 0.0f && eval_veins == 0) {\n"
+                                        + "            for (int dy = cell_h - 1; dy >= 0; dy--) {\n"
+                                        + "                int wy = cell_base_y + dy;\n"
+                                        + "                int s_idx = (wy - chunk_min_y) >> 4;\n"
+                                        + "                if (s_idx < 0 || s_idx >= sec_count) continue;\n"
+                                        + "                if (wy > raw_top_y) raw_top_y = wy;\n"
+                                        + "                c_out_sections[(s_idx << 12) | ((wy & 15) << 8) | col] = default_block;\n"
+                                        + "            }\n"
+                                        + "            continue;\n"
+                                        + "        }\n"
+                                        + "        if (max_c <= 0.0f && aquifers_enabled == 0 && deep_lava_enabled == 0 && (default_fluid <= 0 || cell_base_y > sea_level)) {\n"
+                                        + "            continue;\n"
+                                        + "        }\n")
+                                : "")
+                        + "        for (int dy = cell_h - 1; dy >= 0; dy--) {\n"
+                        + "            int wy = cell_base_y + dy;\n"
+                        + "            int s_idx = (wy - chunk_min_y) >> 4;\n"
+                        + "            if (s_idx < 0 || s_idx >= sec_count) continue;\n"
+                        + (useNativeFp64
+                                ? ("            float dens;\n"
+                                        + "            int solid_sign;\n"
+                                        + "#if defined(LEAFGEN_EXACT_NATIVE_FP64) && defined(cl_khr_fp64)\n"
+                                        + "            double fy64 = (double)dy / (double)cell_h;\n"
+                                        + "            double fx64 = (double)dx / (double)cell_w;\n"
+                                        + "            double fz64 = (double)dz / (double)cell_w;\n"
+                                        + "            double x00_64 = (double)v000 + ((double)v001 - (double)v000) * fy64;\n"
+                                        + "            double x10_64 = (double)v100 + ((double)v101 - (double)v100) * fy64;\n"
+                                        + "            double x01_64 = (double)v010 + ((double)v011 - (double)v010) * fy64;\n"
+                                        + "            double x11_64 = (double)v110 + ((double)v111 - (double)v110) * fy64;\n"
+                                        + "            double z0_64 = x00_64 + (x10_64 - x00_64) * fx64;\n"
+                                        + "            double z1_64 = x01_64 + (x11_64 - x01_64) * fx64;\n"
+                                        + "            double dens64 = z0_64 + (z1_64 - z0_64) * fz64;\n"
+                                        + "            dens = (float)dens64;\n"
+                                        + "            solid_sign = (dens64 > 0.0) ? 1 : 0;\n"
                                         + "#else\n"
-                                        + "        float v000 = s_corners[c00], v001 = s_corners[c00 + 1];\n"
-                                        + "        float v100 = s_corners[c10], v101 = s_corners[c10 + 1];\n"
-                                        + "        float v010 = s_corners[c01], v011 = s_corners[c01 + 1];\n"
-                                        + "        float v110 = s_corners[c11], v111 = s_corners[c11 + 1];\n"
-                                        + "#endif\n")
-                                : ("        float v000 = s_corners[c00], v001 = s_corners[c00 + 1];\n"
-                                        + "        float v100 = s_corners[c10], v101 = s_corners[c10 + 1];\n"
-                                        + "        float v010 = s_corners[c01], v011 = s_corners[c01 + 1];\n"
-                                        + "        float v110 = s_corners[c11], v111 = s_corners[c11 + 1];\n"))
-                        : ("        float v000 = c_corners[c00], v001 = c_corners[c00 + 1];\n"
-                                + "        float v100 = c_corners[c10], v101 = c_corners[c10 + 1];\n"
-                                + "        float v010 = c_corners[c01], v011 = c_corners[c01 + 1];\n"
-                                + "        float v110 = c_corners[c11], v111 = c_corners[c11 + 1];\n"))
-                + "        int cell_base_y = noise_min_y + cy * cell_h;\n"
-                + (!exactMode
-                        ? ("        float min_c = fmin(fmin(fmin(v000, v001), fmin(v100, v101)), fmin(fmin(v010, v011), fmin(v110, v111)));\n"
-                                + "        float max_c = fmax(fmax(fmax(v000, v001), fmax(v100, v101)), fmax(fmax(v010, v011), fmax(v110, v111)));\n"
-                                + "        if (min_c > 0.0f && eval_veins == 0) {\n"
-                                + "            for (int dy = cell_h - 1; dy >= 0; dy--) {\n"
-                                + "                int wy = cell_base_y + dy;\n"
-                                + "                int s_idx = (wy - chunk_min_y) >> 4;\n"
-                                + "                if (s_idx < 0 || s_idx >= sec_count) continue;\n"
-                                + "                if (wy > raw_top_y) raw_top_y = wy;\n"
-                                + "                c_out_sections[(s_idx << 12) | ((wy & 15) << 8) | col] = default_block;\n"
-                                + "            }\n"
-                                + "            continue;\n"
-                                + "        }\n"
-                                + "        if (max_c <= 0.0f && aquifers_enabled == 0 && deep_lava_enabled == 0 && (default_fluid <= 0 || cell_base_y > sea_level)) {\n"
-                                + "            continue;\n"
-                                + "        }\n")
-                        : "")
-                + "        for (int dy = cell_h - 1; dy >= 0; dy--) {\n"
-                + "            int wy = cell_base_y + dy;\n"
-                + "            int s_idx = (wy - chunk_min_y) >> 4;\n"
-                + "            if (s_idx < 0 || s_idx >= sec_count) continue;\n"
-                + (useNativeFp64
-                        ? ("            float dens;\n"
-                                + "            int solid_sign;\n"
-                                + "#if defined(LEAFGEN_EXACT_NATIVE_FP64) && defined(cl_khr_fp64)\n"
-                                + "            double fy64 = (double)dy / (double)cell_h;\n"
-                                + "            double fx64 = (double)dx / (double)cell_w;\n"
-                                + "            double fz64 = (double)dz / (double)cell_w;\n"
-                                + "            double x00_64 = (double)v000 + ((double)v001 - (double)v000) * fy64;\n"
-                                + "            double x10_64 = (double)v100 + ((double)v101 - (double)v100) * fy64;\n"
-                                + "            double x01_64 = (double)v010 + ((double)v011 - (double)v010) * fy64;\n"
-                                + "            double x11_64 = (double)v110 + ((double)v111 - (double)v110) * fy64;\n"
-                                + "            double z0_64 = x00_64 + (x10_64 - x00_64) * fx64;\n"
-                                + "            double z1_64 = x01_64 + (x11_64 - x01_64) * fx64;\n"
-                                + "            double dens64 = z0_64 + (z1_64 - z0_64) * fz64;\n"
-                                + "            dens = (float)dens64;\n"
-                                + "            solid_sign = (dens64 > 0.0) ? 1 : 0;\n"
-                                + "#else\n"
-                                + "            float fy = (float)dy * inv_cell_h;\n"
-                                + "            float x00 = v000 + (v001 - v000) * fy;\n"
-                                + "            float x10 = v100 + (v101 - v100) * fy;\n"
-                                + "            float x01 = v010 + (v011 - v010) * fy;\n"
-                                + "            float x11 = v110 + (v111 - v110) * fy;\n"
-                                + "            float z0 = x00 + (x10 - x00) * fx;\n"
-                                + "            float z1 = x01 + (x11 - x01) * fx;\n"
-                                + "            dens = z0 + (z1 - z0) * fz;\n"
-                                + "            float corner_mag = fabs(v000) + fabs(v001) + fabs(v100) + fabs(v101) + fabs(v010) + fabs(v011) + fabs(v110) + fabs(v111);\n"
-                                + "            if (corner_mag > 1.0e-6f && fabs(dens) <= fmax(CAP_EXACT_SIGN_UNCERTAINTY_EPS, corner_mag * CAP_EXACT_SIGN_UNCERTAINTY_EPS)) {\n"
-                                + "                uncertain_sign_flag = CAP_UNCERTAIN_SIGN_CPU_REFINE_FLAG;\n"
-                                + "            }\n"
-                                + "            solid_sign = (dens > 0.0f) ? 1 : 0;\n"
-                                + "#endif\n"
-                                + "            int flat_idx = (s_idx << 12) | ((wy & 15) << 8) | col;\n"
-                                + "            int vox = 0;\n"
-                                + "            if (solid_sign != 0) {\n")
-                        : (useHybridSignBand
-                                ? ("            float fy = (float)dy * inv_cell_h;\n"
+                                        + "            float fy = (float)dy * inv_cell_h;\n"
                                         + "            float x00 = v000 + (v001 - v000) * fy;\n"
                                         + "            float x10 = v100 + (v101 - v100) * fy;\n"
                                         + "            float x01 = v010 + (v011 - v010) * fy;\n"
                                         + "            float x11 = v110 + (v111 - v110) * fy;\n"
                                         + "            float z0 = x00 + (x10 - x00) * fx;\n"
                                         + "            float z1 = x01 + (x11 - x01) * fx;\n"
-                                        + "            float dens = z0 + (z1 - z0) * fz;\n"
+                                        + "            dens = z0 + (z1 - z0) * fz;\n"
                                         + "            float corner_mag = fabs(v000) + fabs(v001) + fabs(v100) + fabs(v101) + fabs(v010) + fabs(v011) + fabs(v110) + fabs(v111);\n"
                                         + "            if (corner_mag > 1.0e-6f && fabs(dens) <= fmax(CAP_EXACT_SIGN_UNCERTAINTY_EPS, corner_mag * CAP_EXACT_SIGN_UNCERTAINTY_EPS)) {\n"
                                         + "                uncertain_sign_flag = CAP_UNCERTAIN_SIGN_CPU_REFINE_FLAG;\n"
                                         + "            }\n"
+                                        + "            solid_sign = (dens > 0.0f) ? 1 : 0;\n"
+                                        + "#endif\n"
                                         + "            int flat_idx = (s_idx << 12) | ((wy & 15) << 8) | col;\n"
                                         + "            int vox = 0;\n"
-                                        + "            if (dens > 0.0f) {\n")
-                                : ("            float fy = (float)dy * inv_cell_h;\n"
-                                        + "            float x00 = v000 + (v001 - v000) * fy;\n"
-                                        + "            float x10 = v100 + (v101 - v100) * fy;\n"
-                                        + "            float x01 = v010 + (v011 - v010) * fy;\n"
-                                        + "            float x11 = v110 + (v111 - v110) * fy;\n"
-                                        + "            float z0 = x00 + (x10 - x00) * fx;\n"
-                                        + "            float z1 = x01 + (x11 - x01) * fx;\n"
-                                        + "            float dens = z0 + (z1 - z0) * fz;\n"
-                                        + "            int flat_idx = (s_idx << 12) | ((wy & 15) << 8) | col;\n"
-                                        + "            int vox = 0;\n"
-                                        + "            if (dens > 0.0f) {\n")))
+                                        + "            if (solid_sign != 0) {\n")
+                                : (useHybridSignBand
+                                        ? ("            float fy = (float)dy * inv_cell_h;\n"
+                                                + "            float x00 = v000 + (v001 - v000) * fy;\n"
+                                                + "            float x10 = v100 + (v101 - v100) * fy;\n"
+                                                + "            float x01 = v010 + (v011 - v010) * fy;\n"
+                                                + "            float x11 = v110 + (v111 - v110) * fy;\n"
+                                                + "            float z0 = x00 + (x10 - x00) * fx;\n"
+                                                + "            float z1 = x01 + (x11 - x01) * fx;\n"
+                                                + "            float dens = z0 + (z1 - z0) * fz;\n"
+                                                + "            float corner_mag = fabs(v000) + fabs(v001) + fabs(v100) + fabs(v101) + fabs(v010) + fabs(v011) + fabs(v110) + fabs(v111);\n"
+                                                + "            if (corner_mag > 1.0e-6f && fabs(dens) <= fmax(CAP_EXACT_SIGN_UNCERTAINTY_EPS, corner_mag * CAP_EXACT_SIGN_UNCERTAINTY_EPS)) {\n"
+                                                + "                uncertain_sign_flag = CAP_UNCERTAIN_SIGN_CPU_REFINE_FLAG;\n"
+                                                + "            }\n"
+                                                + "            int flat_idx = (s_idx << 12) | ((wy & 15) << 8) | col;\n"
+                                                + "            int vox = 0;\n"
+                                                + "            if (dens > 0.0f) {\n")
+                                        : ("            float fy = (float)dy * inv_cell_h;\n"
+                                                + "            float x00 = v000 + (v001 - v000) * fy;\n"
+                                                + "            float x10 = v100 + (v101 - v100) * fy;\n"
+                                                + "            float x01 = v010 + (v011 - v010) * fy;\n"
+                                                + "            float x11 = v110 + (v111 - v110) * fy;\n"
+                                                + "            float z0 = x00 + (x10 - x00) * fx;\n"
+                                                + "            float z1 = x01 + (x11 - x01) * fx;\n"
+                                                + "            float dens = z0 + (z1 - z0) * fz;\n"
+                                                + "            int flat_idx = (s_idx << 12) | ((wy & 15) << 8) | col;\n"
+                                                + "            int vox = 0;\n"
+                                                + "            if (dens > 0.0f) {\n")))))
                 + "                vox = default_block;\n"
                 + "                if (wy > raw_top_y) raw_top_y = wy;\n"
                 + "                if (eval_veins != 0 && ((wy >= " + rv.upperMinY() + " && wy <= " + rv.upperMaxY()
@@ -5760,5 +7304,201 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
                 + "        }\n"
                 + "        barrier(CLK_GLOBAL_MEM_FENCE);\n"
                 + "    }\n";
+    }
+
+    private static String emitMultiInterpGpuCornerFill(
+            int interpChCount,
+            int cornersPerChunk,
+            int cols2dPre,
+            int cellsZ,
+            int strideZ,
+            boolean useNativeFp64,
+            DiamondMemoPlan memoPlan
+    ) {
+        boolean fp64Local = useNativeFp64 && (interpChCount * cornersPerChunk * 8) <= 28672;
+        StringBuilder sb = new StringBuilder(2048);
+        sb.append("    if (has_gpu_corners != 0) {\n");
+        if (memoPlan.isActive()) {
+            sb.append("        int bands_per_col = 256 / ").append(cols2dPre).append(";\n")
+                    .append("        if (bands_per_col < 1) bands_per_col = 1;\n")
+                    .append("        int active_threads = ").append(cols2dPre).append(" * bands_per_col;\n")
+                    .append("        if (col < active_threads) {\n")
+                    .append("            int col2d = col / bands_per_col;\n")
+                    .append("            int band_y = col - col2d * bands_per_col;\n")
+                    .append("            int gx_c = col2d / ").append(cellsZ + 1).append(";\n")
+                    .append("            int gz_c = col2d - gx_c * ").append(cellsZ + 1).append(";\n")
+                    .append("            int c_bx = (chunk_x << 4) + gx_c * cell_w;\n")
+                    .append("            int c_bz = (chunk_z << 4) + gz_c * cell_w;\n")
+                    .append("            int y_per_band = (").append(strideZ).append(" + bands_per_col - 1) / bands_per_col;\n")
+                    .append("            int gy_start = band_y * y_per_band;\n")
+                    .append("            int gy_end = gy_start + y_per_band;\n")
+                    .append("            if (gy_end > ").append(strideZ).append(") gy_end = ").append(strideZ).append(";\n")
+                    .append("            uint memo_mask = 0u;\n")
+                    .append("            ").append(memoPlan.elemType()).append(" memo_val[").append(memoPlan.slotCount()).append("];\n")
+                    .append("            int base_ci = gx_c * stride_x + gz_c * stride_z;\n")
+                    .append("            for (int gy_c = gy_start; gy_c < gy_end; gy_c++) {\n")
+                    .append("                memo_mask &= ").append(Integer.toUnsignedString(memoPlan.keep2dMask())).append("u;\n")
+                    .append("                int c_by = noise_min_y + gy_c * cell_h;\n")
+                    .append("                int ci_pos = base_ci + gy_c;\n");
+            if (fp64Local) {
+                sb.append("#if defined(LEAFGEN_EXACT_NATIVE_FP64) && defined(cl_khr_fp64)\n")
+                        .append("                s_interp_ch[ci_pos] = eval_lifted_interp_ch_0_f64(c_bx, c_by, c_bz, rule_ops, &memo_mask, memo_val);\n")
+                        .append("#else\n")
+                        .append("                s_interp_ch[ci_pos] = eval_lifted_interp_ch_0(c_bx, c_by, c_bz, rule_ops, &memo_mask, memo_val);\n")
+                        .append("#endif\n");
+            } else {
+                sb.append("                s_interp_ch[ci_pos] = eval_lifted_interp_ch_0(c_bx, c_by, c_bz, rule_ops, &memo_mask, memo_val);\n");
+            }
+            sb.append("            }\n")
+                    .append("        }\n");
+        } else {
+            sb.append("        for (int ci = col; ci < ").append(cornersPerChunk).append("; ci += 256) {\n")
+                    .append("            int gx_c = ci / stride_x;\n")
+                    .append("            int rem_c = ci - gx_c * stride_x;\n")
+                    .append("            int gz_c = rem_c / stride_z;\n")
+                    .append("            int gy_c = rem_c - gz_c * stride_z;\n")
+                    .append("            int c_bx = (chunk_x << 4) + gx_c * cell_w;\n")
+                    .append("            int c_by = noise_min_y + gy_c * cell_h;\n")
+                    .append("            int c_bz = (chunk_z << 4) + gz_c * cell_w;\n");
+            if (fp64Local) {
+                sb.append("#if defined(LEAFGEN_EXACT_NATIVE_FP64) && defined(cl_khr_fp64)\n")
+                        .append("            s_interp_ch[ci] = eval_lifted_interp_ch_0_f64(c_bx, c_by, c_bz, rule_ops);\n")
+                        .append("#else\n")
+                        .append("            s_interp_ch[ci] = eval_lifted_interp_ch_0(c_bx, c_by, c_bz, rule_ops);\n")
+                        .append("#endif\n");
+            } else {
+                sb.append("            s_interp_ch[ci] = eval_lifted_interp_ch_0(c_bx, c_by, c_bz, rule_ops);\n");
+            }
+            sb.append("        }\n");
+        }
+        if (interpChCount > 1) {
+            sb.append("        for (int ci = col; ci < ").append(cornersPerChunk).append("; ci += 256) {\n")
+                    .append("            int gx_c = ci / stride_x;\n")
+                    .append("            int rem_c = ci - gx_c * stride_x;\n")
+                    .append("            int gz_c = rem_c / stride_z;\n")
+                    .append("            int gy_c = rem_c - gz_c * stride_z;\n")
+                    .append("            int c_bx = (chunk_x << 4) + gx_c * cell_w;\n")
+                    .append("            int c_by = noise_min_y + gy_c * cell_h;\n")
+                    .append("            int c_bz = (chunk_z << 4) + gz_c * cell_w;\n");
+            for (int ch = 1; ch < interpChCount; ch++) {
+                int off = ch * cornersPerChunk;
+                if (fp64Local) {
+                    sb.append("#if defined(LEAFGEN_EXACT_NATIVE_FP64) && defined(cl_khr_fp64)\n")
+                            .append("            s_interp_ch[").append(off).append(" + ci] = eval_lifted_interp_ch_").append(ch).append("_f64(c_bx, c_by, c_bz, rule_ops);\n")
+                            .append("#else\n")
+                            .append("            s_interp_ch[").append(off).append(" + ci] = eval_lifted_interp_ch_").append(ch).append("(c_bx, c_by, c_bz, rule_ops);\n")
+                            .append("#endif\n");
+                } else {
+                    sb.append("            s_interp_ch[").append(off).append(" + ci] = eval_lifted_interp_ch_").append(ch).append("(c_bx, c_by, c_bz, rule_ops);\n");
+                }
+            }
+            sb.append("        }\n");
+        }
+        sb.append("    } else {\n")
+                .append("        for (int ci = col; ci < ").append(cornersPerChunk).append("; ci += 256) {\n")
+                .append("            s_interp_ch[ci] = c_corners[ci];\n")
+                .append("        }\n")
+                .append("    }\n")
+                .append("    barrier(CLK_LOCAL_MEM_FENCE);\n");
+        return sb.toString();
+    }
+
+    private static String emitMultiInterpGpuCellEval(
+            int interpChCount,
+            int cornersPerChunk,
+            String combinerF32,
+            String combinerF64,
+            boolean exactMode,
+            boolean useNativeFp64,
+            boolean useHybridSignBand
+    ) {
+        boolean fp64Local = useNativeFp64 && (interpChCount * cornersPerChunk * 8) <= 28672;
+        StringBuilder sb = new StringBuilder(1536);
+        sb.append("        int cell_base_y = noise_min_y + cy * cell_h;\n")
+                .append("        for (int dy = cell_h - 1; dy >= 0; dy--) {\n")
+                .append("            int wy = cell_base_y + dy;\n")
+                .append("            int s_idx = (wy - chunk_min_y) >> 4;\n")
+                .append("            if (s_idx < 0 || s_idx >= sec_count) continue;\n");
+        if (fp64Local) {
+            sb.append("            float dens;\n")
+                    .append("            int solid_sign;\n")
+                    .append("#if defined(LEAFGEN_EXACT_NATIVE_FP64) && defined(cl_khr_fp64)\n")
+                    .append("            double fy64 = (double)dy / (double)cell_h;\n")
+                    .append("            double fx64 = (double)dx / (double)cell_w;\n")
+                    .append("            double fz64 = (double)dz / (double)cell_w;\n")
+                    .append("            double dens64;\n")
+                    .append("            if (has_gpu_corners != 0) {\n")
+                    .append("                double ch[").append(interpChCount).append("];\n")
+                    .append("                for (int k = 0; k < ").append(interpChCount).append("; k++) {\n")
+                    .append("                    int base = k * ").append(cornersPerChunk).append(";\n")
+                    .append("                    double x00 = s_interp_ch[base + c00] + (s_interp_ch[base + c00 + 1] - s_interp_ch[base + c00]) * fy64;\n")
+                    .append("                    double x10 = s_interp_ch[base + c10] + (s_interp_ch[base + c10 + 1] - s_interp_ch[base + c10]) * fy64;\n")
+                    .append("                    double x01 = s_interp_ch[base + c01] + (s_interp_ch[base + c01 + 1] - s_interp_ch[base + c01]) * fy64;\n")
+                    .append("                    double x11 = s_interp_ch[base + c11] + (s_interp_ch[base + c11 + 1] - s_interp_ch[base + c11]) * fy64;\n")
+                    .append("                    double z0 = x00 + (x10 - x00) * fx64;\n")
+                    .append("                    double z1 = x01 + (x11 - x01) * fx64;\n")
+                    .append("                    ch[k] = z0 + (z1 - z0) * fz64;\n")
+                    .append("                }\n")
+                    .append("                dens64 = (").append(combinerF64).append(");\n")
+                    .append("                if (add_beard_delta != 0) {\n")
+                    .append("                    dens64 += (double)eval_mojang_beard_voxel(c_corners, bx, wy, bz);\n")
+                    .append("                }\n")
+                    .append("            } else {\n")
+                    .append("                double x00 = s_interp_ch[c00] + (s_interp_ch[c00 + 1] - s_interp_ch[c00]) * fy64;\n")
+                    .append("                double x10 = s_interp_ch[c10] + (s_interp_ch[c10 + 1] - s_interp_ch[c10]) * fy64;\n")
+                    .append("                double x01 = s_interp_ch[c01] + (s_interp_ch[c01 + 1] - s_interp_ch[c01]) * fy64;\n")
+                    .append("                double x11 = s_interp_ch[c11] + (s_interp_ch[c11 + 1] - s_interp_ch[c11]) * fy64;\n")
+                    .append("                double z0 = x00 + (x10 - x00) * fx64;\n")
+                    .append("                double z1 = x01 + (x11 - x01) * fx64;\n")
+                    .append("                dens64 = z0 + (z1 - z0) * fz64;\n")
+                    .append("            }\n")
+                    .append("            dens = (float)dens64;\n")
+                    .append("            solid_sign = (dens64 > 0.0) ? 1 : 0;\n")
+                    .append("#else\n");
+        }
+        sb.append("            float fy = (float)dy * inv_cell_h;\n")
+                .append(fp64Local ? "" : "            float dens;\n")
+                .append("            if (has_gpu_corners != 0) {\n")
+                .append("                float ch[").append(interpChCount).append("];\n")
+                .append("                for (int k = 0; k < ").append(interpChCount).append("; k++) {\n")
+                .append("                    int base = k * ").append(cornersPerChunk).append(";\n")
+                .append("                    float x00 = (float)s_interp_ch[base + c00] + ((float)s_interp_ch[base + c00 + 1] - (float)s_interp_ch[base + c00]) * fy;\n")
+                .append("                    float x10 = (float)s_interp_ch[base + c10] + ((float)s_interp_ch[base + c10 + 1] - (float)s_interp_ch[base + c10]) * fy;\n")
+                .append("                    float x01 = (float)s_interp_ch[base + c01] + ((float)s_interp_ch[base + c01 + 1] - (float)s_interp_ch[base + c01]) * fy;\n")
+                .append("                    float x11 = (float)s_interp_ch[base + c11] + ((float)s_interp_ch[base + c11 + 1] - (float)s_interp_ch[base + c11]) * fy;\n")
+                .append("                    float z0 = x00 + (x10 - x00) * fx;\n")
+                .append("                    float z1 = x01 + (x11 - x01) * fx;\n")
+                .append("                    ch[k] = z0 + (z1 - z0) * fz;\n")
+                .append("                }\n")
+                .append("                dens = (").append(combinerF32).append(");\n")
+                .append("                if (add_beard_delta != 0) {\n")
+                .append("                    dens += eval_mojang_beard_voxel(c_corners, bx, wy, bz);\n")
+                .append("                }\n")
+                .append("            } else {\n")
+                .append("                float x00 = (float)s_interp_ch[c00] + ((float)s_interp_ch[c00 + 1] - (float)s_interp_ch[c00]) * fy;\n")
+                .append("                float x10 = (float)s_interp_ch[c10] + ((float)s_interp_ch[c10 + 1] - (float)s_interp_ch[c10]) * fy;\n")
+                .append("                float x01 = (float)s_interp_ch[c01] + ((float)s_interp_ch[c01 + 1] - (float)s_interp_ch[c01]) * fy;\n")
+                .append("                float x11 = (float)s_interp_ch[c11] + ((float)s_interp_ch[c11 + 1] - (float)s_interp_ch[c11]) * fy;\n")
+                .append("                float z0 = x00 + (x10 - x00) * fx;\n")
+                .append("                float z1 = x01 + (x11 - x01) * fx;\n")
+                .append("                dens = z0 + (z1 - z0) * fz;\n")
+                .append("            }\n");
+        if (exactMode && (fp64Local || useHybridSignBand)) {
+            sb.append("            if (fabs(dens) <= 5.0e-4f) {\n")
+                    .append("                uncertain_sign_flag = CAP_UNCERTAIN_SIGN_CPU_REFINE_FLAG;\n")
+                    .append("            }\n");
+        }
+        if (fp64Local) {
+            sb.append("            solid_sign = (dens > 0.0f) ? 1 : 0;\n")
+                    .append("#endif\n")
+                    .append("            int flat_idx = (s_idx << 12) | ((wy & 15) << 8) | col;\n")
+                    .append("            int vox = 0;\n")
+                    .append("            if (solid_sign != 0) {\n");
+        } else {
+            sb.append("            int flat_idx = (s_idx << 12) | ((wy & 15) << 8) | col;\n")
+                    .append("            int vox = 0;\n")
+                    .append("            if (dens > 0.0f) {\n");
+        }
+        return sb.toString();
     }
 }

@@ -22,6 +22,8 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicIntegerArray;
@@ -37,6 +39,7 @@ import java.util.concurrent.atomic.AtomicIntegerArray;
  *
  * @governedBy anvil-api-ADR-003
  * @governedBy anvil-api-ADR-002
+ * @governedBy anvil-api-ADR-007
  * @governedBy leafanvil-ADR-005
  * @governedBy leafanvil-ADR-006
  * @governedBy ADR-016
@@ -172,6 +175,7 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
         final long headerChecksum;
         final long rootHeaderWord;
         final long rootTrailerWord;
+        final boolean patternOnly;
         final LcaSectionCodec.ParsedHeaderAndDict parsed;
 
         FastDictCacheSlot(
@@ -179,13 +183,35 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
                 long headerChecksum,
                 long rootHeaderWord,
                 long rootTrailerWord,
+                boolean patternOnly,
                 LcaSectionCodec.ParsedHeaderAndDict parsed
         ) {
             this.regionBytesRef = regionBytesRef;
             this.headerChecksum = headerChecksum;
             this.rootHeaderWord = rootHeaderWord;
             this.rootTrailerWord = rootTrailerWord;
+            this.patternOnly = patternOnly;
             this.parsed = parsed;
+        }
+    }
+
+    private static final class DictIntList {
+        int[] data;
+        int size;
+
+        DictIntList(int initialCap) {
+            this.data = new int[Math.max(16, initialCap)];
+        }
+
+        void add(int v) {
+            if (size == data.length) {
+                data = Arrays.copyOf(data, data.length << 1);
+            }
+            data[size++] = v;
+        }
+
+        int[] toArray() {
+            return Arrays.copyOf(data, size);
         }
     }
 
@@ -336,9 +362,10 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
             return false;
         }
         validateCoordinates(rx, rz);
-        Boolean livePatched = LcaRegionWriter.tryPatchOpenLiveArchive(
+        LcaRegionWriter.OpenArchivePatchResult livePatchResult = LcaRegionWriter.tryPatchOpenLiveArchive(
                 regionFile, rx, rz, patches, isReplaceable);
-        if (livePatched != null) {
+        if (livePatchResult != LcaRegionWriter.OpenArchivePatchResult.NOT_OPEN) {
+            boolean livePatched = livePatchResult == LcaRegionWriter.OpenArchivePatchResult.PATCHED;
             if (livePatched) {
                 invalidateFastDictCache();
                 FILE_HEADER_CACHE.remove(regionFile);
@@ -495,7 +522,7 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
             int paletteLimitRel = LcaSectionCodec.findFirstSectionRelStart(
                     sectionRelStarts, sectionCount, residualRelStart);
             localPal = LcaSectionCodec.decodeSlabLocalPalette(
-                    frame, fOff, sectionDirEnd, paletteLimitRel, true, true, meta.canonicalStates);
+                    frame, fOff, sectionDirEnd, paletteLimitRel, true, true, meta);
             activeCanonicalStates = localPal.canonicalStates;
             activeBaseBlockNames = localPal.baseBlockNames;
             activeBiomes = localPal.biomes;
@@ -508,7 +535,7 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
                 ? LcaSectionCodec.locateAndDecodeChunkPatchTail(
                         frame, fOff, frameLen, residualRelStart, residualRelEnd,
                         sectionCount, sectionDirEnd, scale4B, hasSlabLocalPalette,
-                        localPal, meta.canonicalStates, true, false,
+                        localPal, meta, true, false,
                         sectionEntries, sectionRelStarts)
                 : null;
         if (patchTail != null) {
@@ -521,14 +548,19 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
                         frame, fOff, residualRelStart, residualRelEnd, meta.minSectionY, sectionCount,
                         (meta.regionX << 5) + rx, (meta.regionZ << 5) + rz, meta.formatVersion)
                 : new LcaSectionCodec.ResidualTailDecoded(
-                        new LinkedHashMap<>(), Collections.emptyList(), Collections.emptyList(), false);
+                        new LinkedHashMap<>(),
+                        Collections.emptyList(),
+                        Collections.emptyList(),
+                        false,
+                        Collections.emptyMap());
 
         LinkedHashMap<String, Object> root = tail.rootMap();
         root.putIfAbsent("DataVersion", chunkDataVersion);
         if (statusOrdinal == LcaSectionCodec.STATUS_ORDINAL_RESIDUAL
-                && !(root.get("Status") instanceof String)) {
+                && !(root.get("Status") instanceof String)
+                && !(root.get("status") instanceof String)) {
             throw new CorruptRegionEntryException(
-                    "CBIT T5: chunkStatusOrdinal=0xFD missing residual Status tag");
+                    "CBIT T5: chunkStatusOrdinal=0xFD missing residual Status/status tag");
         }
         if (tail.nonVoxelRoot()) {
             if (statusOrdinal != LcaSectionCodec.STATUS_ORDINAL_ABSENT
@@ -617,6 +649,10 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
                 } else if (starlightZeroEligible) {
                     secMap.put("starlight.blocklight_state", 1);
                 }
+                Map<String, Object> secExtras = tail.sectionExtrasByY().get(sectionY);
+                if (secExtras != null) {
+                    secExtras.forEach(secMap::putIfAbsent);
+                }
                 sectionCompounds.add(secMap);
             } else {
                 LcaSectionCodec.DecodedSection dec;
@@ -683,6 +719,10 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
                     }
                 } else if (hasStarlightVersion && !sectionOnlyAir) {
                     secMap.put("starlight.blocklight_state", 1);
+                }
+                Map<String, Object> secExtras = tail.sectionExtrasByY().get(sectionY);
+                if (secExtras != null) {
+                    secExtras.forEach(secMap::putIfAbsent);
                 }
                 sectionCompounds.add(secMap);
             }
@@ -985,6 +1025,48 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
         return relStarts;
     }
 
+    static int[] computeSectionRelStartsFromBuffer(
+            ByteBuffer frame,
+            int fOff,
+            int frameLen,
+            int sectionCount,
+            int sectionDirEnd,
+            int residualRelStart,
+            boolean scale4B,
+            int[] entriesOut,
+            int[] relStarts
+    ) throws CorruptRegionEntryException {
+        if (sectionDirEnd > residualRelStart || residualRelStart > frameLen) {
+            throw new CorruptRegionEntryException("CBIT T5: sectionOffsets/residualNbtRelOffset out of bounds");
+        }
+        boolean hasResidualNbt = (frame.get(fOff + 21) & 1) != 0;
+        int unitShift = scale4B ? 2 : 0;
+        int maxRelPos = -1;
+        for (int i = 0; i < sectionCount; i++) {
+            int entry16 = LcaSectionCodec.readUint16BEBuffer(frame, fOff + 24 + (i << 1));
+            entriesOut[i] = entry16;
+            if (entry16 != 0 && (entry16 & 0x8000) == 0) {
+                int relPos = sectionDirEnd + ((entry16 - 1) << unitShift);
+                if (relPos < sectionDirEnd || relPos >= frameLen || (hasResidualNbt && relPos == residualRelStart)) {
+                    throw new CorruptRegionEntryException("CBIT T5: sectionOffsets[" + i + "] out of bounds: " + relPos);
+                }
+                if (relPos <= maxRelPos) {
+                    for (int k = 0; k < i; k++) {
+                        if (relStarts[k] == relPos) {
+                            throw new CorruptRegionEntryException("CBIT T5: Duplicate non-uniform sectionOffsets[] at " + i);
+                        }
+                    }
+                } else {
+                    maxRelPos = relPos;
+                }
+                relStarts[i] = relPos;
+            } else {
+                relStarts[i] = -1;
+            }
+        }
+        return relStarts;
+    }
+
     static int findSectionRelEnd(
             int[] relStarts, int idx, int sectionCount, int residualRelStart, int frameLen
     ) {
@@ -1100,7 +1182,7 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
             }
             if (needsBody) {
                 if (preParsedMeta == null && regionBytes != null) {
-                    preParsedMeta = (hasSlabLocalPalette && stripProperties)
+                    preParsedMeta = (sb.formatVersion < LCA_FORMAT_VERSION_V3 && hasSlabLocalPalette && stripProperties)
                             ? INSTANCE.resolveFastPatternDictOnly(regionBytes, regionLength, sb, recoveryReport)
                             : INSTANCE.parseAndValidateSuperblockAndDict(regionBytes, regionLength, recoveryReport);
                 }
@@ -1136,18 +1218,18 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
         List<LcaSectionCodec.BiomeTemplate> biomeTemplates = Collections.emptyList();
         LcaSectionCodec.SlabLocalPalette localPal = null;
 
-        List<String> regionCanonicalForSlab = Collections.emptyList();
+        LcaSectionCodec.ParsedHeaderAndDict regionMetaForSlab = preParsedMeta;
         if (hasSlabLocalPalette) {
-            if (!stripProperties) {
-                LcaSectionCodec.ParsedHeaderAndDict regionMeta = (preParsedMeta != null && !preParsedMeta.canonicalStates.isEmpty())
-                        ? preParsedMeta
-                        : INSTANCE.parseAndValidateSuperblockAndDict(regionBytes, regionLength, recoveryReport);
-                regionCanonicalForSlab = regionMeta.canonicalStates;
+            boolean needsFullDict = sb.formatVersion >= LCA_FORMAT_VERSION_V3 || !stripProperties;
+            if (needsFullDict
+                    && (regionMetaForSlab == null
+                            || (regionMetaForSlab.canonicalStates.isEmpty() && regionBytes != null))) {
+                regionMetaForSlab = INSTANCE.parseAndValidateSuperblockAndDict(regionBytes, regionLength, recoveryReport);
             }
             int paletteLimitRel = LcaSectionCodec.findFirstSectionRelStart(
                     relStarts, sectionCount, residualRelStart);
             localPal = LcaSectionCodec.decodeSlabLocalPalette(
-                    frame, fOff, sectionDirEnd, paletteLimitRel, !stripProperties, decodeBiomes, regionCanonicalForSlab);
+                    frame, fOff, sectionDirEnd, paletteLimitRel, !stripProperties, decodeBiomes, regionMetaForSlab);
             canonicalStates = localPal.canonicalStates;
             baseBlockNames = localPal.baseBlockNames;
             singletonBasePalettes = localPal.singletonBasePalettes;
@@ -1158,6 +1240,7 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
             LcaSectionCodec.ParsedHeaderAndDict regionMeta = preParsedMeta != null
                     ? preParsedMeta
                     : INSTANCE.parseAndValidateSuperblockAndDict(regionBytes, regionLength, recoveryReport);
+            regionMetaForSlab = regionMeta;
             canonicalStates = regionMeta.canonicalStates;
             baseBlockNames = regionMeta.baseBlockNames;
             singletonBasePalettes = regionMeta.singletonBasePalettes;
@@ -1172,7 +1255,7 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
                 ? LcaSectionCodec.locateAndDecodeChunkPatchTail(
                         frame, fOff, frameLen, residualRelStart, residualRelEnd,
                         sectionCount, sectionDirEnd, scale4B, hasSlabLocalPalette,
-                        localPal, regionCanonicalForSlab, !stripProperties, true,
+                        localPal, regionMetaForSlab, !stripProperties, true,
                         entries, relStarts)
                 : null;
         if (patchTail != null) {
@@ -1825,11 +1908,36 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
                 patchPayloadStart = pos;
                 pos += patchPayloadLen;
             }
+            if ((bpFlags & LcaV3Codec.BP_FLAG_HAS_EXTENDED_FLAGS) != 0 && pos < limitBytes) {
+                int extFlags = LcaSectionCodec.readVarInt(buf, pos, limitBytes);
+                pos += LcaSectionCodec.varIntLen(extFlags);
+                if ((extFlags & LcaV3Codec.EXT_FLAG_COLUMNAR_BLOCK_TICKS) != 0 && pos < limitBytes) {
+                    int bLen = LcaSectionCodec.readVarInt(buf, pos, limitBytes);
+                    pos += LcaSectionCodec.varIntLen(bLen) + bLen;
+                }
+                if ((extFlags & LcaV3Codec.EXT_FLAG_COLUMNAR_FLUID_TICKS) != 0 && pos < limitBytes) {
+                    int fLen = LcaSectionCodec.readVarInt(buf, pos, limitBytes);
+                    pos += LcaSectionCodec.varIntLen(fLen) + fLen;
+                }
+                if ((extFlags & LcaV3Codec.EXT_FLAG_COLUMNAR_BLOCK_ENTITIES) != 0 && pos < limitBytes) {
+                    int beLen = LcaSectionCodec.readVarInt(buf, pos, limitBytes);
+                    pos += LcaSectionCodec.varIntLen(beLen) + beLen;
+                }
+                if ((extFlags & LcaV3Codec.EXT_FLAG_SPARSE_POST_PROCESSING) != 0 && pos < limitBytes) {
+                    int ppLen = LcaSectionCodec.readVarInt(buf, pos, limitBytes);
+                    pos += LcaSectionCodec.varIntLen(ppLen) + ppLen;
+                }
+                if ((extFlags & LcaV3Codec.EXT_FLAG_DICT_STRUCTURES) != 0 && pos < limitBytes) {
+                    int stLen = LcaSectionCodec.readVarInt(buf, pos, limitBytes);
+                    pos += LcaSectionCodec.varIntLen(stLen) + stLen;
+                }
+            }
+            int fmtVersion = (buf.length >= 10) ? LcaSectionCodec.readUint16BE(buf, 0x08) : LCA_FORMAT_VERSION;
             int maxPostSecStart = LcaSectionCodec.findMaxPostResidualSectionStart(
                     buf, frameStart, sectionCount, sectionDirEnd, unitShift,
-                    residualStart, patchPayloadStart, patchPayloadLen, limitBytes);
+                    residualStart, patchPayloadStart, patchPayloadLen, limitBytes, fmtVersion);
             if (maxPostSecStart >= 0) {
-                int secEnd = LcaSectionCodec.skipSectionFrame(buf, maxPostSecStart, limitBytes);
+                int secEnd = LcaSectionCodec.skipSectionFrame(buf, maxPostSecStart, limitBytes, fmtVersion);
                 if (secEnd > pos && secEnd <= limitBytes) {
                     pos = secEnd;
                 }
@@ -1895,6 +2003,13 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
                 if (pos < limit) {
                     int paletteLen = LcaSectionCodec.readVarInt(buf, pos, limit);
                     pos += LcaSectionCodec.varIntLen(paletteLen);
+                    if (paletteLen == 0 && pos < limit) {
+                        int secExtFlags = buf[pos++] & 0xFF;
+                        if (LcaV3Codec.isValidSecExtFlags(secExtFlags) && pos < limit) {
+                            paletteLen = LcaSectionCodec.readVarInt(buf, pos, limit);
+                            pos += LcaSectionCodec.varIntLen(paletteLen);
+                        }
+                    }
                     if (paletteLen >= 1 && pos < limit) {
                         int dominantDictId = LcaSectionCodec.readVarInt(buf, pos, limit);
                         if (dominantDictId >= 0 && dominantDictId < dictBaseNames.size()) {
@@ -1966,27 +2081,9 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
                     recoveryReport.dictSecDedHealedWords += dictHealed;
                 }
             }
-            int segStateCount = LcaSectionCodec.readIntBE(regionBytes, segOffset);
-            int segBiomeCount = LcaSectionCodec.readUint16BE(regionBytes, segOffset + 4);
             int usedPayloadBytes = LcaSectionCodec.readUint16BE(regionBytes, segOffset + 6);
             int activeEnd = segOffset + 8 + usedPayloadBytes;
-            if (segStateCount < 0 || segStateCount > 65536
-                    || segBiomeCount < 0 || segBiomeCount > 16384
-                    || activeEnd > segPayloadLimit) {
-                throw new CorruptRegionEntryException("CBIT T5: Dictionary segment header corrupt");
-            }
-            int pos = segOffset + 8;
-            for (int i = 0; i < segStateCount; i++) {
-                int utfLen = LcaSectionCodec.readVarInt(regionBytes, pos, segPayloadLimit);
-                pos += LcaSectionCodec.varIntLen(utfLen) + utfLen + 4;
-            }
-            for (int i = 0; i < segBiomeCount; i++) {
-                int utfLen = LcaSectionCodec.readVarInt(regionBytes, pos, segPayloadLimit);
-                pos += LcaSectionCodec.varIntLen(utfLen) + utfLen + 4;
-            }
-            if (pos > activeEnd) {
-                throw new CorruptRegionEntryException("CBIT T5: Dictionary entries exceed usedPayloadBytes");
-            }
+            int pos = skipDictSegmentEntriesToPattern(regionBytes, segOffset, segCap, sb.formatVersion);
             if (pos < activeEnd) {
                 int sliceLen = activeEnd - pos;
                 if (singleArena == null && multiArena == null) {
@@ -2009,9 +2106,14 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
             segCap = nextCapSlabs24 << SLAB_SHIFT;
         }
 
-        byte[] patternArena = multiArena != null
-                ? multiArena.toByteArray()
-                : (singleArena != null ? singleArena : LcaSectionCodec.EMPTY_BYTES);
+        byte[] patternArena;
+        if (multiArena != null) {
+            patternArena = multiArena.toByteArray();
+        } else if (singleArena != null) {
+            patternArena = singleArena;
+        } else {
+            patternArena = LcaSectionCodec.EMPTY_BYTES;
+        }
         LcaSectionCodec.ParsedHeaderAndDict parsed = new LcaSectionCodec.ParsedHeaderAndDict(
                 sb.formatVersion,
                 regionBytes[0x0A] & 0xFF,
@@ -2022,9 +2124,237 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
                 patternArena);
         if (recoveryReport == null) {
             FAST_DICT_RING[ringIdx] = new FastDictCacheSlot(
-                    regionBytes, actualChecksum, rootHeaderWord, rootTrailerWord, parsed);
+                    regionBytes, actualChecksum, rootHeaderWord, rootTrailerWord, true, parsed);
         }
         return parsed;
+    }
+
+    private static int skipDictSegmentEntriesToPattern(
+            byte[] segBuf, int segOffset, int segCap, int formatVersion
+    ) throws CorruptRegionEntryException {
+        int segPayloadLimit = segOffset + segCap - 8;
+        int usedPayloadBytes = LcaSectionCodec.readUint16BE(segBuf, segOffset + 6);
+        int activeEnd = segOffset + 8 + usedPayloadBytes;
+        if (activeEnd > segPayloadLimit) {
+            throw new CorruptRegionEntryException("CBIT T5: Dictionary segment header corrupt");
+        }
+        if (formatVersion >= LCA_FORMAT_VERSION_V3) {
+            int segStateCount = LcaSectionCodec.readUint16BE(segBuf, segOffset);
+            int segBiomeCount = LcaSectionCodec.readUint16BE(segBuf, segOffset + 2);
+            int segBaseBlockCount = LcaSectionCodec.readUint16BE(segBuf, segOffset + 4);
+            if (segBiomeCount > 16384 || (usedPayloadBytes != 0 && usedPayloadBytes < 2)) {
+                throw new CorruptRegionEntryException("CBIT T5: Factored v3 dictionary segment header corrupt");
+            }
+            if (usedPayloadBytes == 0) {
+                if (segStateCount != 0 || segBiomeCount != 0 || segBaseBlockCount != 0) {
+                    throw new CorruptRegionEntryException("CBIT T5: Non-zero counts in zero-payload v3 dict segment");
+                }
+                return activeEnd;
+            }
+            int segPropTupleCount = LcaSectionCodec.readUint16BE(segBuf, segOffset + 8);
+            int pos = segOffset + 10;
+            for (int i = 0; i < segBaseBlockCount; i++) {
+                int utfLen = LcaSectionCodec.readVarInt(segBuf, pos, activeEnd);
+                pos += LcaSectionCodec.varIntLen(utfLen);
+                if (utfLen < 0 || pos + utfLen > activeEnd) {
+                    throw new CorruptRegionEntryException("CBIT T5: Truncated v3 BaseBlock entry");
+                }
+                pos += utfLen;
+            }
+            for (int i = 0; i < segPropTupleCount; i++) {
+                int utfLen = LcaSectionCodec.readVarInt(segBuf, pos, activeEnd);
+                pos += LcaSectionCodec.varIntLen(utfLen);
+                if (utfLen < 2 || pos + utfLen > activeEnd) {
+                    throw new CorruptRegionEntryException("CBIT T5: Truncated v3 PropTuple entry");
+                }
+                pos += utfLen;
+            }
+            for (int i = 0; i < segStateCount; i++) {
+                int baseId = LcaSectionCodec.readVarInt(segBuf, pos, activeEnd);
+                pos += LcaSectionCodec.varIntLen(baseId);
+                int propPlusOne = LcaSectionCodec.readVarInt(segBuf, pos, activeEnd);
+                pos += LcaSectionCodec.varIntLen(propPlusOne);
+                if (pos + 4 > activeEnd) {
+                    throw new CorruptRegionEntryException("CBIT T5: Truncated v3 BlockState entry");
+                }
+                pos += 4;
+            }
+            for (int i = 0; i < segBiomeCount; i++) {
+                int utfLen = LcaSectionCodec.readVarInt(segBuf, pos, activeEnd);
+                pos += LcaSectionCodec.varIntLen(utfLen);
+                if (utfLen < 0 || pos + utfLen + 4 > activeEnd) {
+                    throw new CorruptRegionEntryException("CBIT T5: Truncated v3 Biome entry");
+                }
+                pos += utfLen + 4;
+            }
+            if (pos > activeEnd) {
+                throw new CorruptRegionEntryException("CBIT T5: Dictionary entries exceed usedPayloadBytes");
+            }
+            return pos;
+        }
+
+        int segStateCount = LcaSectionCodec.readIntBE(segBuf, segOffset);
+        int segBiomeCount = LcaSectionCodec.readUint16BE(segBuf, segOffset + 4);
+        if (segStateCount < 0 || segStateCount > 65536 || segBiomeCount < 0 || segBiomeCount > 16384) {
+            throw new CorruptRegionEntryException("CBIT T5: Dictionary segment header corrupt");
+        }
+        int pos = segOffset + 8;
+        for (int i = 0; i < segStateCount; i++) {
+            int utfLen = LcaSectionCodec.readVarInt(segBuf, pos, segPayloadLimit);
+            pos += LcaSectionCodec.varIntLen(utfLen) + utfLen + 4;
+        }
+        for (int i = 0; i < segBiomeCount; i++) {
+            int utfLen = LcaSectionCodec.readVarInt(segBuf, pos, segPayloadLimit);
+            pos += LcaSectionCodec.varIntLen(utfLen) + utfLen + 4;
+        }
+        if (pos > activeEnd) {
+            throw new CorruptRegionEntryException("CBIT T5: Dictionary entries exceed usedPayloadBytes");
+        }
+        return pos;
+    }
+
+    private static int parseDictSegmentEntries(
+            byte[] segBuf,
+            int segOffset,
+            int segCap,
+            int formatVersion,
+            List<String> canonicalStates,
+            List<String> baseBlockNames,
+            List<List<String>> singletonBasePalettes,
+            List<String> biomes,
+            List<List<String>> singletonBiomePalettes,
+            List<String> v3BaseBlockTable,
+            List<List<String>> v3BaseBlockSingletons,
+            List<String> v3PropTupleTable,
+            DictIntList v3StateBaseIds,
+            DictIntList v3StatePropIds,
+            DictIntList v3StateMatPacked
+    ) throws CorruptRegionEntryException {
+        int segPayloadLimit = segOffset + segCap - 8;
+        int usedPayloadBytes = LcaSectionCodec.readUint16BE(segBuf, segOffset + 6);
+        int activeEnd = segOffset + 8 + usedPayloadBytes;
+        if (activeEnd > segPayloadLimit) {
+            throw new CorruptRegionEntryException("CBIT T5: Dictionary segment header corrupt at " + segOffset);
+        }
+        if (formatVersion >= LCA_FORMAT_VERSION_V3) {
+            int segStateCount = LcaSectionCodec.readUint16BE(segBuf, segOffset);
+            int segBiomeCount = LcaSectionCodec.readUint16BE(segBuf, segOffset + 2);
+            int segBaseBlockCount = LcaSectionCodec.readUint16BE(segBuf, segOffset + 4);
+            if (segBiomeCount > 16384 || (usedPayloadBytes != 0 && usedPayloadBytes < 2)) {
+                throw new CorruptRegionEntryException("CBIT T5: Factored v3 dictionary segment header corrupt at " + segOffset);
+            }
+            if (usedPayloadBytes == 0) {
+                if (segStateCount != 0 || segBiomeCount != 0 || segBaseBlockCount != 0) {
+                    throw new CorruptRegionEntryException("CBIT T5: Non-zero counts in zero-payload v3 dict segment at " + segOffset);
+                }
+                return activeEnd;
+            }
+            int segPropTupleCount = LcaSectionCodec.readUint16BE(segBuf, segOffset + 8);
+            int pos = segOffset + 10;
+
+            for (int i = 0; i < segBaseBlockCount; i++) {
+                int utfLen = LcaSectionCodec.readVarInt(segBuf, pos, activeEnd);
+                pos += LcaSectionCodec.varIntLen(utfLen);
+                if (utfLen < 0 || pos + utfLen > activeEnd) {
+                    throw new CorruptRegionEntryException("CBIT T5: Truncated v3 dictionary BaseBlock entry");
+                }
+                String baseName = new String(segBuf, pos, utfLen, StandardCharsets.UTF_8);
+                pos += utfLen;
+                v3BaseBlockTable.add(baseName);
+                v3BaseBlockSingletons.add(List.of(baseName));
+            }
+
+            for (int i = 0; i < segPropTupleCount; i++) {
+                int utfLen = LcaSectionCodec.readVarInt(segBuf, pos, activeEnd);
+                pos += LcaSectionCodec.varIntLen(utfLen);
+                if (utfLen < 2 || pos + utfLen > activeEnd) {
+                    throw new CorruptRegionEntryException("CBIT T5: Truncated or invalid v3 dictionary PropTuple entry");
+                }
+                String propTuple = new String(segBuf, pos, utfLen, StandardCharsets.UTF_8);
+                if (propTuple.charAt(0) != '[' || propTuple.charAt(propTuple.length() - 1) != ']') {
+                    throw new CorruptRegionEntryException("CBIT T5: Malformed v3 dictionary PropTuple entry: " + propTuple);
+                }
+                pos += utfLen;
+                v3PropTupleTable.add(propTuple);
+            }
+
+            int totalBases = v3BaseBlockTable.size();
+            int totalProps = v3PropTupleTable.size();
+            for (int i = 0; i < segStateCount; i++) {
+                int baseId = LcaSectionCodec.readVarInt(segBuf, pos, activeEnd);
+                pos += LcaSectionCodec.varIntLen(baseId);
+                int propPlusOne = LcaSectionCodec.readVarInt(segBuf, pos, activeEnd);
+                pos += LcaSectionCodec.varIntLen(propPlusOne);
+                if (baseId < 0 || baseId >= totalBases || propPlusOne < 0 || propPlusOne > totalProps || pos + 4 > activeEnd) {
+                    throw new CorruptRegionEntryException("CBIT T5: Invalid causal ID or truncated v3 dictionary BlockState entry");
+                }
+                int mat32 = LcaSectionCodec.readIntBE(segBuf, pos);
+                pos += 4;
+                String baseName = v3BaseBlockTable.get(baseId);
+                String canonical = propPlusOne == 0 ? baseName : (baseName + v3PropTupleTable.get(propPlusOne - 1));
+                canonicalStates.add(canonical);
+                baseBlockNames.add(baseName);
+                singletonBasePalettes.add(v3BaseBlockSingletons.get(baseId));
+                v3StateBaseIds.add(baseId);
+                v3StatePropIds.add(propPlusOne - 1);
+                v3StateMatPacked.add(mat32);
+            }
+
+            for (int i = 0; i < segBiomeCount; i++) {
+                int utfLen = LcaSectionCodec.readVarInt(segBuf, pos, activeEnd);
+                pos += LcaSectionCodec.varIntLen(utfLen);
+                if (utfLen < 0 || pos + utfLen + 4 > activeEnd) {
+                    throw new CorruptRegionEntryException("CBIT T5: Truncated v3 dictionary Biome entry");
+                }
+                String biomeId = new String(segBuf, pos, utfLen, StandardCharsets.UTF_8);
+                pos += utfLen + 4;
+                biomes.add(biomeId);
+                singletonBiomePalettes.add(List.of(biomeId));
+            }
+
+            if (pos > activeEnd) {
+                throw new CorruptRegionEntryException("CBIT T5: Dictionary entries exceed usedPayloadBytes at " + segOffset);
+            }
+            return pos;
+        }
+
+        int segStateCount = LcaSectionCodec.readIntBE(segBuf, segOffset);
+        int segBiomeCount = LcaSectionCodec.readUint16BE(segBuf, segOffset + 4);
+        if (segStateCount < 0 || segStateCount > 65536 || segBiomeCount < 0 || segBiomeCount > 16384) {
+            throw new CorruptRegionEntryException("CBIT T5: Dictionary segment header corrupt at " + segOffset);
+        }
+
+        int pos = segOffset + 8;
+        for (int i = 0; i < segStateCount; i++) {
+            int utfLen = LcaSectionCodec.readVarInt(segBuf, pos, segPayloadLimit);
+            pos += LcaSectionCodec.varIntLen(utfLen);
+            if (utfLen < 0 || pos + utfLen + 4 > segPayloadLimit) {
+                throw new CorruptRegionEntryException("CBIT T5: Truncated dictionary BlockState entry");
+            }
+            String canonical = new String(segBuf, pos, utfLen, StandardCharsets.UTF_8);
+            pos += utfLen + 4;
+            String baseName = LcaSectionCodec.stripBlockProperties(canonical);
+            canonicalStates.add(canonical);
+            baseBlockNames.add(baseName);
+            singletonBasePalettes.add(List.of(baseName));
+        }
+
+        for (int i = 0; i < segBiomeCount; i++) {
+            int utfLen = LcaSectionCodec.readVarInt(segBuf, pos, segPayloadLimit);
+            pos += LcaSectionCodec.varIntLen(utfLen);
+            if (utfLen < 0 || pos + utfLen + 4 > segPayloadLimit) {
+                throw new CorruptRegionEntryException("CBIT T5: Truncated dictionary Biome entry");
+            }
+            String biomeId = new String(segBuf, pos, utfLen, StandardCharsets.UTF_8);
+            pos += utfLen + 4;
+            biomes.add(biomeId);
+            singletonBiomePalettes.add(List.of(biomeId));
+        }
+
+        if (pos > activeEnd) {
+            throw new CorruptRegionEntryException("CBIT T5: Dictionary entries exceed usedPayloadBytes at " + segOffset);
+        }
+        return pos;
     }
 
     /**
@@ -2059,11 +2389,11 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
         if (recoveryReport == null) {
             FastDictCacheSlot cachedSlot = FAST_DICT_RING[ringIdx];
             if (cachedSlot != null
+                    && !cachedSlot.patternOnly
                     && cachedSlot.regionBytesRef == regionBytes
                     && cachedSlot.headerChecksum == actualChecksum
                     && cachedSlot.rootHeaderWord == rootHeaderWord
-                    && cachedSlot.rootTrailerWord == rootTrailerWord
-                    && (!cachedSlot.parsed.canonicalStates.isEmpty() || (rootHeaderWord >>> 32) == 0L)) {
+                    && cachedSlot.rootTrailerWord == rootTrailerWord) {
                 return cachedSlot.parsed;
             }
         }
@@ -2077,13 +2407,22 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
         int defaultDataVersion = LcaSectionCodec.readIntBE(regionBytes, 0x1C);
         long slabPoolBaseOffset = (long) LONG_BE_VIEW.get(regionBytes, 0x30);
 
-        // Walk dynamically chained dictionary segments (Section 3.1, CBIT T5 acyclic <= 64 segments)
-        int initStateCap = Math.min(1024, Math.max(16, LcaSectionCodec.readIntBE(regionBytes, rootDictOffset)));
+        boolean factoredV3 = sb.formatVersion >= LCA_FORMAT_VERSION_V3;
+        int rootCountHint = factoredV3
+                ? LcaSectionCodec.readUint16BE(regionBytes, rootDictOffset)
+                : LcaSectionCodec.readIntBE(regionBytes, rootDictOffset);
+        int initStateCap = Math.min(1024, Math.max(16, rootCountHint));
         List<String> canonicalStates = new ArrayList<>(initStateCap);
         List<String> baseBlockNames = new ArrayList<>(initStateCap);
         List<List<String>> singletonBasePalettes = new ArrayList<>(initStateCap);
         List<String> biomes = new ArrayList<>(16);
         List<List<String>> singletonBiomePalettes = new ArrayList<>(16);
+        List<String> v3BaseBlockTable = factoredV3 ? new ArrayList<>(Math.max(16, initStateCap)) : null;
+        List<List<String>> v3BaseBlockSingletons = factoredV3 ? new ArrayList<>(Math.max(16, initStateCap)) : null;
+        List<String> v3PropTupleTable = factoredV3 ? new ArrayList<>(Math.max(16, initStateCap)) : null;
+        DictIntList v3StateBaseIds = factoredV3 ? new DictIntList(initStateCap) : null;
+        DictIntList v3StatePropIds = factoredV3 ? new DictIntList(initStateCap) : null;
+        DictIntList v3StateMatPacked = factoredV3 ? new DictIntList(initStateCap) : null;
         ByteArrayOutputStream patternArenaOut = null;
 
         int segOffset = rootDictOffset;
@@ -2116,46 +2455,14 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
                 }
             }
 
-            int segStateCount = LcaSectionCodec.readIntBE(regionBytes, segOffset);
-            int segBiomeCount = LcaSectionCodec.readUint16BE(regionBytes, segOffset + 4);
             int usedPayloadBytes = LcaSectionCodec.readUint16BE(regionBytes, segOffset + 6);
-            if (segStateCount < 0 || segStateCount > 65536
-                    || segBiomeCount < 0 || segBiomeCount > 16384
-                    || segOffset + 8 + usedPayloadBytes > segPayloadLimit) {
-                throw new CorruptRegionEntryException("CBIT T5: Dictionary segment header corrupt at " + segOffset);
-            }
-
-            int pos = segOffset + 8;
-            for (int i = 0; i < segStateCount; i++) {
-                int utfLen = LcaSectionCodec.readVarInt(regionBytes, pos, segPayloadLimit);
-                pos += LcaSectionCodec.varIntLen(utfLen);
-                if (utfLen < 0 || pos + utfLen + 4 > segPayloadLimit) {
-                    throw new CorruptRegionEntryException("CBIT T5: Truncated dictionary BlockState entry");
-                }
-                String canonical = new String(regionBytes, pos, utfLen, StandardCharsets.UTF_8);
-                pos += utfLen + 4;
-                String baseName = LcaSectionCodec.stripBlockProperties(canonical);
-                canonicalStates.add(canonical);
-                baseBlockNames.add(baseName);
-                singletonBasePalettes.add(List.of(baseName));
-            }
-
-            for (int i = 0; i < segBiomeCount; i++) {
-                int utfLen = LcaSectionCodec.readVarInt(regionBytes, pos, segPayloadLimit);
-                pos += LcaSectionCodec.varIntLen(utfLen);
-                if (utfLen < 0 || pos + utfLen + 4 > segPayloadLimit) {
-                    throw new CorruptRegionEntryException("CBIT T5: Truncated dictionary Biome entry");
-                }
-                String biomeId = new String(regionBytes, pos, utfLen, StandardCharsets.UTF_8);
-                pos += utfLen + 4;
-                biomes.add(biomeId);
-                singletonBiomePalettes.add(List.of(biomeId));
-            }
-
             int activeEnd = segOffset + 8 + usedPayloadBytes;
-            if (pos > activeEnd) {
-                throw new CorruptRegionEntryException("CBIT T5: Dictionary entries exceed usedPayloadBytes at " + segOffset);
-            }
+            int pos = parseDictSegmentEntries(
+                    regionBytes, segOffset, segCap, sb.formatVersion,
+                    canonicalStates, baseBlockNames, singletonBasePalettes,
+                    biomes, singletonBiomePalettes,
+                    v3BaseBlockTable, v3BaseBlockSingletons, v3PropTupleTable,
+                    v3StateBaseIds, v3StatePropIds, v3StateMatPacked);
             if (pos < activeEnd) {
                 if (patternArenaOut == null) {
                     patternArenaOut = new ByteArrayOutputStream(Math.max(512, activeEnd - pos));
@@ -2175,21 +2482,36 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
         byte[] patternArenaBytes = patternArenaOut == null
                 ? LcaSectionCodec.EMPTY_BYTES
                 : patternArenaOut.toByteArray();
-        LcaSectionCodec.ParsedHeaderAndDict parsed = new LcaSectionCodec.ParsedHeaderAndDict(
-                sb.formatVersion,
-                storageKind, regionX, regionZ, minSectionY, sectionCount, defaultDataVersion,
-                flags, slabPoolBaseOffset,
-                Collections.unmodifiableList(canonicalStates),
-                Collections.unmodifiableList(baseBlockNames),
-                Collections.unmodifiableList(singletonBasePalettes),
-                Collections.unmodifiableList(biomes),
-                Collections.unmodifiableList(singletonBiomePalettes),
-                patternArenaBytes
-        );
+        LcaSectionCodec.ParsedHeaderAndDict parsed = factoredV3
+                ? new LcaSectionCodec.ParsedHeaderAndDict(
+                        sb.formatVersion,
+                        storageKind, regionX, regionZ, minSectionY, sectionCount, defaultDataVersion,
+                        flags, slabPoolBaseOffset,
+                        Collections.unmodifiableList(canonicalStates),
+                        Collections.unmodifiableList(baseBlockNames),
+                        Collections.unmodifiableList(singletonBasePalettes),
+                        Collections.unmodifiableList(biomes),
+                        Collections.unmodifiableList(singletonBiomePalettes),
+                        patternArenaBytes,
+                        v3BaseBlockTable.toArray(new String[0]),
+                        v3PropTupleTable.toArray(new String[0]),
+                        v3StateBaseIds.toArray(),
+                        v3StatePropIds.toArray(),
+                        v3StateMatPacked.toArray())
+                : new LcaSectionCodec.ParsedHeaderAndDict(
+                        sb.formatVersion,
+                        storageKind, regionX, regionZ, minSectionY, sectionCount, defaultDataVersion,
+                        flags, slabPoolBaseOffset,
+                        Collections.unmodifiableList(canonicalStates),
+                        Collections.unmodifiableList(baseBlockNames),
+                        Collections.unmodifiableList(singletonBasePalettes),
+                        Collections.unmodifiableList(biomes),
+                        Collections.unmodifiableList(singletonBiomePalettes),
+                        patternArenaBytes);
         rootHeaderWord = (long) LONG_BE_VIEW.get(regionBytes, rootDictOffset);
         rootTrailerWord = (long) LONG_BE_VIEW.get(regionBytes, rootDictOffset + rootDictCapacity - 8);
         FAST_DICT_RING[ringIdx] = new FastDictCacheSlot(
-                regionBytes, actualChecksum, rootHeaderWord, rootTrailerWord, parsed);
+                regionBytes, actualChecksum, rootHeaderWord, rootTrailerWord, false, parsed);
         return parsed;
     }
 
@@ -2335,6 +2657,7 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
             return d;
         }
 
+        @SuppressWarnings("java:S1168")
         int[] resolveDictIdToRuntimeId(
                 LcaSectionCodec.ParsedHeaderAndDict dict,
                 java.util.function.Function<String, Integer> runtimeStateLookup
@@ -2485,17 +2808,30 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
         }
     }
 
-    @SuppressWarnings("java:S1168")
-    public static byte[] readChunkNbtBytesFromChannel(
-            Path regionFile, FileChannel channel, int rx, int rz
+    @FunctionalInterface
+    private interface ChannelFallback<T> {
+        T read() throws IOException;
+    }
+
+    @FunctionalInterface
+    private interface ChannelHeaderAction<T> {
+        T read(CachedFileHeader header) throws IOException;
+    }
+
+    private static <T> T readFromChannelWithRetry(
+            Path regionFile,
+            FileChannel channel,
+            int rx,
+            int rz,
+            ChannelFallback<T> closedFallback,
+            ChannelHeaderAction<T> action
     ) throws IOException {
         validateCoordinates(rx, rz);
         if (regionFile == null) return null;
         if (channel == null || !channel.isOpen()) {
-            return readChunkNbtBytesFromFile(regionFile, rx, rz);
+            return closedFallback.read();
         }
         CachedFileHeader header = freshFileHeader(regionFile);
-        boolean cachedHeader = header != null;
         if (header == null) {
             long mtime = fileMtimeOrMinusOne(regionFile);
             if (mtime < 0L) {
@@ -2503,28 +2839,24 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
                 return null;
             }
             header = revalidateFileHeader(regionFile, mtime);
-            if (header != null) {
-                cachedHeader = true;
-            } else {
+            if (header == null) {
                 header = loadFileHeader(regionFile, channel, mtime);
                 if (header == null) return null;
             }
         }
+        boolean canRetry = true;
         while (true) {
             try {
                 if (!header.isOccupied(rx, rz)) {
                     return null;
                 }
-                ChunkSlabView snap = readSlabFromChannel(channel, header, rx, rz);
-                if (snap == null) return null;
-                LcaSectionCodec.ParsedHeaderAndDict dict = header.ensureParsedDict(channel);
-                return encodeChunkNbtBytesFromFrame(dict, snap, rx, rz);
+                return action.read(header);
             } catch (CorruptRegionEntryException e) {
-                if (cachedHeader) {
-                    cachedHeader = false;
+                if (canRetry) {
+                    canRetry = false;
+                    invalidateFileCache(regionFile);
                     long mtime = fileMtimeOrMinusOne(regionFile);
                     if (mtime < 0L) {
-                        invalidateFileCache(regionFile);
                         return null;
                     }
                     header = loadFileHeader(regionFile, channel, mtime);
@@ -2534,6 +2866,24 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
                 throw e;
             }
         }
+    }
+
+    @SuppressWarnings("java:S1168")
+    public static byte[] readChunkNbtBytesFromChannel(
+            Path regionFile, FileChannel channel, int rx, int rz
+    ) throws IOException {
+        return readFromChannelWithRetry(
+                regionFile,
+                channel,
+                rx,
+                rz,
+                () -> readChunkNbtBytesFromFile(regionFile, rx, rz),
+                header -> {
+                    ChunkSlabView snap = readSlabFromChannel(channel, header, rx, rz);
+                    if (snap == null) return null;
+                    LcaSectionCodec.ParsedHeaderAndDict dict = header.ensureParsedDict(channel);
+                    return encodeChunkNbtBytesFromFrame(dict, snap, rx, rz);
+                });
     }
 
     static RawChunkFrameSnapshot buildRawChunkFrameSnapshot(
@@ -2562,10 +2912,12 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
                 meta.minSectionY,
                 meta.sectionCount,
                 residualNbtRelOffset,
-                dictIdToRuntimeId
+                dictIdToRuntimeId,
+                meta.formatVersion
         );
     }
 
+    @SuppressWarnings({"java:S1168", "java:S4276"})
     static int[] buildDictIdToRuntimeIdArray(
             List<String> canonicalStates,
             java.util.function.Function<String, Integer> runtimeStateLookup
@@ -2612,52 +2964,912 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
             int rz,
             java.util.function.Function<String, Integer> runtimeStateLookup
     ) throws IOException {
-        validateCoordinates(rx, rz);
-        if (regionFile == null) return null;
-        if (channel == null || !channel.isOpen()) {
-            return readRawChunkFrameFromFile(regionFile, rx, rz, runtimeStateLookup);
+        return readFromChannelWithRetry(
+                regionFile,
+                channel,
+                rx,
+                rz,
+                () -> readRawChunkFrameFromFile(regionFile, rx, rz, runtimeStateLookup),
+                header -> {
+                    ChunkSlabView snap = readSlabFromChannel(channel, header, rx, rz);
+                    if (snap == null) return null;
+                    LcaSectionCodec.ParsedHeaderAndDict dict = header.ensureParsedDict(channel);
+                    int[] dictIdToRuntimeId = header.resolveDictIdToRuntimeId(dict, runtimeStateLookup);
+                    return buildRawChunkFrameSnapshot(dict, snap, rx, rz, dictIdToRuntimeId);
+                });
+    }
+
+    /**
+     * Paired single-read result holding both the immutable uncompressed {@link RawChunkFrameSnapshot}
+     * and the lightweight Mojang metadata NBT bytes (with section {@code block_states} omitted when
+     * fast-path eligible, or {@code null} when the caller must fall back to full NBT decoding).
+     */
+    public record RawChunkFrameWithMetadata(
+            RawChunkFrameSnapshot frame,
+            byte[] metadataNbtBytes
+    ) {
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof RawChunkFrameWithMetadata other)) return false;
+            return Objects.equals(frame, other.frame)
+                    && Arrays.equals(metadataNbtBytes, other.metadataNbtBytes);
         }
-        CachedFileHeader header = freshFileHeader(regionFile);
-        boolean cachedHeader = header != null;
-        if (header == null) {
-            long mtime = fileMtimeOrMinusOne(regionFile);
-            if (mtime < 0L) {
-                invalidateFileCache(regionFile);
+
+        @Override
+        public int hashCode() {
+            return 31 * Objects.hashCode(frame) + Arrays.hashCode(metadataNbtBytes);
+        }
+
+        @Override
+        public String toString() {
+            return "RawChunkFrameWithMetadata[frame=" + frame
+                    + ", metadataNbtBytes=" + Arrays.toString(metadataNbtBytes) + "]";
+        }
+    }
+
+    /**
+     * Paired single-read result holding both the immutable uncompressed {@link RawChunkFrameSnapshot}
+     * and zero-NBT decoded chunk metadata ({@link LcaDecodedChunkMeta}, or {@code null} when the
+     * caller must fall back to full NBT decoding).
+     */
+    public record RawChunkFrameWithDirectMeta(
+            RawChunkFrameSnapshot frame,
+            LcaDecodedChunkMeta directMeta
+    ) {}
+
+    @SuppressWarnings("java:S1168")
+    static LcaDecodedChunkMeta decodeChunkMetadataDirectFromSnapshot(
+            LcaSectionCodec.ParsedHeaderAndDict meta,
+            RawChunkFrameSnapshot snapshot,
+            int rx,
+            int rz
+    ) throws IOException {
+        byte[] frame = snapshot.chunkFrame();
+        int frameLen = frame.length;
+        if (frameLen < 24) {
+            throw new CorruptRegionEntryException("CBIT T5: ChunkFrame too short (" + frameLen + " < 24)");
+        }
+        int chunkDataVersion = snapshot.dataVersion();
+        long lastUpdateTick = snapshot.lastUpdateTick();
+        long inhabitedTimeTicks = snapshot.inhabitedTimeTicks();
+        int statusOrdinal = snapshot.statusOrdinal();
+        int chunkFlags = snapshot.chunkFlags();
+        boolean scale4B = (chunkFlags & 4) != 0;
+        int sectionCount = meta.sectionCount;
+        int sectionDirEnd = 24 + (sectionCount << 1);
+        int residualRelStart = snapshot.residualRelStart();
+
+        LcaSectionCodec.ScratchArena arena = LcaSectionCodec.scratch();
+        int[] sectionEntries = arena.sectionEntries;
+        int[] sectionRelStarts = computeSectionRelStarts(
+                frame, 0, frameLen, sectionCount, sectionDirEnd, residualRelStart, scale4B,
+                sectionEntries, arena.sectionRelStarts);
+
+        try {
+            return LcaSectionCodec.decodeChunkMetadataDirect(
+                    meta, frame, 0, frameLen, chunkDataVersion, lastUpdateTick, inhabitedTimeTicks,
+                    statusOrdinal, chunkFlags, residualRelStart, rx, rz, sectionEntries, sectionRelStarts);
+        } catch (RuntimeException ex) {
+            CorruptRegionEntryException corrupt = new CorruptRegionEntryException(
+                    "CBIT T5: Direct chunk metadata decode failed: " + ex.getMessage());
+            corrupt.initCause(ex);
+            throw corrupt;
+        }
+    }
+
+    @SuppressWarnings("java:S1168")
+    public static RawChunkFrameWithDirectMeta readRawChunkFrameWithDirectMetaFromFile(
+            Path regionFile,
+            int rx,
+            int rz,
+            java.util.function.Function<String, Integer> runtimeStateLookup
+    ) throws IOException {
+        if (regionFile == null) return null;
+        try (FileChannel ch = FileChannel.open(regionFile, StandardOpenOption.READ)) {
+            return readRawChunkFrameWithDirectMetaFromChannel(regionFile, ch, rx, rz, runtimeStateLookup);
+        } catch (NoSuchFileException e) {
+            invalidateFileCache(regionFile);
+            return null;
+        }
+    }
+
+    @SuppressWarnings("java:S1168")
+    public static RawChunkFrameWithDirectMeta readRawChunkFrameWithDirectMetaFromChannel(
+            Path regionFile,
+            FileChannel channel,
+            int rx,
+            int rz,
+            java.util.function.Function<String, Integer> runtimeStateLookup
+    ) throws IOException {
+        return readFromChannelWithRetry(
+                regionFile,
+                channel,
+                rx,
+                rz,
+                () -> readRawChunkFrameWithDirectMetaFromFile(regionFile, rx, rz, runtimeStateLookup),
+                header -> {
+                    ChunkSlabView snap = readSlabFromChannel(channel, header, rx, rz);
+                    if (snap == null) return null;
+                    LcaSectionCodec.ParsedHeaderAndDict dict = header.ensureParsedDict(channel);
+                    int[] dictIdToRuntimeId = header.resolveDictIdToRuntimeId(dict, runtimeStateLookup);
+                    RawChunkFrameSnapshot frame = buildRawChunkFrameSnapshot(dict, snap, rx, rz, dictIdToRuntimeId);
+                    LcaDecodedChunkMeta directMeta = decodeChunkMetadataDirectFromSnapshot(dict, frame, rx, rz);
+                    return new RawChunkFrameWithDirectMeta(frame, directMeta);
+                });
+    }
+
+    @SuppressWarnings("java:S1168")
+    static RawChunkFrameWithDirectMeta readRawChunkFrameWithDirectMetaFromBytes(
+            CachedFileHeader header,
+            FileChannel channel,
+            byte[] regionBytes,
+            int rx,
+            int rz,
+            java.util.function.Function<String, Integer> runtimeStateLookup
+    ) throws IOException {
+        validateCoordinates(rx, rz);
+        if (header == null || regionBytes == null) {
+            return null;
+        }
+        if (!header.isOccupied(rx, rz)) {
+            return null;
+        }
+        LcaSectionCodec.ParsedHeaderAndDict dict = header.ensureParsedDict(channel);
+        ChunkSlabView snap = INSTANCE.resolveChunkSlab(
+                regionBytes, regionBytes.length, dict.sectionCount, rx, rz, false, null);
+        if (snap == null) {
+            return null;
+        }
+        int[] dictIdToRuntimeId = header.resolveDictIdToRuntimeId(dict, runtimeStateLookup);
+        RawChunkFrameSnapshot frame = buildRawChunkFrameSnapshot(dict, snap, rx, rz, dictIdToRuntimeId);
+        LcaDecodedChunkMeta directMeta = decodeChunkMetadataDirectFromSnapshot(dict, frame, rx, rz);
+        return new RawChunkFrameWithDirectMeta(frame, directMeta);
+    }
+
+    /**
+     * Immutable raw `.lca` chunk slab snapshot read on an I/O thread for parallel decompression
+     * and zero-NBT direct metadata decoding on worker threads (`REQ-RTP-S-005`).
+     */
+    public static final class DeferredChunkSlab {
+        private final int rx;
+        private final int rz;
+        private final int ptrByteOffset;
+        private final long ptrBefore;
+        private final int codec1;
+        private final int generation8;
+        private final byte[] rawSlab;
+        private final LcaSectionCodec.ParsedHeaderAndDict dict;
+        private final int[] dictIdToRuntimeId;
+
+        DeferredChunkSlab(
+                int rx,
+                int rz,
+                int ptrByteOffset,
+                long ptrBefore,
+                int codec1,
+                int generation8,
+                byte[] rawSlab,
+                LcaSectionCodec.ParsedHeaderAndDict dict,
+                int[] dictIdToRuntimeId
+        ) {
+            this.rx = rx;
+            this.rz = rz;
+            this.ptrByteOffset = ptrByteOffset;
+            this.ptrBefore = ptrBefore;
+            this.codec1 = codec1;
+            this.generation8 = generation8;
+            this.rawSlab = rawSlab;
+            this.dict = dict;
+            this.dictIdToRuntimeId = dictIdToRuntimeId;
+        }
+
+        /**
+         * Decompresses (when Mode B {@code codec1 == 1}) and decodes zero-NBT direct chunk metadata
+         * purely in-memory on any worker thread with zero file I/O (`REQ-RTP-S-005`).
+         */
+        public RawChunkFrameWithDirectMeta decodeToDirectMeta() throws IOException {
+            ChunkSlabView snap = buildSlabViewFromCopy(
+                    rx, rz, ptrByteOffset, ptrBefore, codec1, rawSlab.length, generation8,
+                    rawSlab, dict.sectionCount, null);
+            RawChunkFrameSnapshot frame = buildRawChunkFrameSnapshot(dict, snap, rx, rz, dictIdToRuntimeId);
+            LcaDecodedChunkMeta directMeta = decodeChunkMetadataDirectFromSnapshot(dict, frame, rx, rz);
+            return new RawChunkFrameWithDirectMeta(frame, directMeta);
+        }
+    }
+
+    @SuppressWarnings("java:S1168")
+    public static DeferredChunkSlab readDeferredChunkSlabFromFile(
+            Path regionFile,
+            int rx,
+            int rz,
+            java.util.function.Function<String, Integer> runtimeStateLookup
+    ) throws IOException {
+        if (regionFile == null) return null;
+        try (FileChannel ch = FileChannel.open(regionFile, StandardOpenOption.READ)) {
+            return readDeferredChunkSlabFromChannel(regionFile, ch, rx, rz, runtimeStateLookup);
+        } catch (NoSuchFileException e) {
+            invalidateFileCache(regionFile);
+            return null;
+        }
+    }
+
+    @SuppressWarnings("java:S1168")
+    public static DeferredChunkSlab readDeferredChunkSlabFromChannel(
+            Path regionFile,
+            FileChannel channel,
+            int rx,
+            int rz,
+            java.util.function.Function<String, Integer> runtimeStateLookup
+    ) throws IOException {
+        return readFromChannelWithRetry(
+                regionFile,
+                channel,
+                rx,
+                rz,
+                () -> readDeferredChunkSlabFromFile(regionFile, rx, rz, runtimeStateLookup),
+                header -> {
+                    int chunkIdx = (rx & 31) | ((rz & 31) << 5);
+                    int ptrByteOffset = POINTER_DIRECTORY_OFFSET + (chunkIdx << 3);
+                    long ptr = header.pointer(rx, rz);
+                    long slabOffset35 = ptr >>> 29;
+                    int codec1 = (int) ((ptr >>> 28) & 1L);
+                    int exactByteLen20 = (int) ((ptr >>> 8) & 0xFFFFFL);
+                    int generation8 = (int) (ptr & 0xFFL);
+                    if (slabOffset35 == 0 || exactByteLen20 == 0) {
+                        return null;
+                    }
+                    long payloadStartOffset = slabOffset35 << SLAB_SHIFT;
+                    if (payloadStartOffset < DICT_ROOT_OFFSET
+                            || exactByteLen20 > MAX_CHUNK_UNCOMPRESSED_BYTES
+                            || payloadStartOffset + exactByteLen20 > header.fileSize - FOOTER_SIZE) {
+                        throw new CorruptRegionEntryException(
+                                "CBIT T3/T4: Chunk pointer (" + rx + "," + rz + ") out of bounds");
+                    }
+                    byte[] rawSlab = new byte[exactByteLen20];
+                    int hazardSlot = pinHazardSlab((int) slabOffset35);
+                    try {
+                        readChannelFully(channel, rawSlab, 0, exactByteLen20, payloadStartOffset, null);
+                    } finally {
+                        unpinHazardSlab(hazardSlot);
+                    }
+                    LcaSectionCodec.ParsedHeaderAndDict dict = header.ensureParsedDict(channel);
+                    int[] dictIdToRuntimeId = header.resolveDictIdToRuntimeId(dict, runtimeStateLookup);
+                    return new DeferredChunkSlab(
+                            rx, rz, ptrByteOffset, ptr, codec1, generation8, rawSlab, dict, dictIdToRuntimeId);
+                });
+    }
+
+    @SuppressWarnings("java:S1168")
+    static DeferredChunkSlab readDeferredChunkSlabFromBytes(
+            CachedFileHeader header,
+            FileChannel channel,
+            byte[] regionBytes,
+            int rx,
+            int rz,
+            java.util.function.Function<String, Integer> runtimeStateLookup
+    ) throws IOException {
+        validateCoordinates(rx, rz);
+        if (header == null || regionBytes == null || !header.isOccupied(rx, rz)) {
+            return null;
+        }
+        int chunkIdx = (rx & 31) | ((rz & 31) << 5);
+        int ptrByteOffset = POINTER_DIRECTORY_OFFSET + (chunkIdx << 3);
+        long ptr = header.pointer(rx, rz);
+        long slabOffset35 = ptr >>> 29;
+        int codec1 = (int) ((ptr >>> 28) & 1L);
+        int exactByteLen20 = (int) ((ptr >>> 8) & 0xFFFFFL);
+        int generation8 = (int) (ptr & 0xFFL);
+        if (slabOffset35 == 0 || exactByteLen20 == 0) {
+            return null;
+        }
+        long payloadStartOffset = slabOffset35 << SLAB_SHIFT;
+        if (payloadStartOffset < DICT_ROOT_OFFSET
+                || exactByteLen20 > MAX_CHUNK_UNCOMPRESSED_BYTES
+                || payloadStartOffset + exactByteLen20 > regionBytes.length - FOOTER_SIZE) {
+            throw new CorruptRegionEntryException(
+                    "CBIT T3/T4: Chunk pointer (" + rx + "," + rz + ") out of bounds");
+        }
+        int start = (int) payloadStartOffset;
+        byte[] rawSlab = Arrays.copyOfRange(regionBytes, start, start + exactByteLen20);
+        LcaSectionCodec.ParsedHeaderAndDict dict = header.ensureParsedDict(channel);
+        int[] dictIdToRuntimeId = header.resolveDictIdToRuntimeId(dict, runtimeStateLookup);
+        return new DeferredChunkSlab(
+                rx, rz, ptrByteOffset, ptr, codec1, generation8, rawSlab, dict, dictIdToRuntimeId);
+    }
+
+    /**
+     * Zero-copy off-heap Mode A chunk view referencing an immutable direct off-heap {@link ByteBuffer}
+     * (either a read-ahead region slab or a single-chunk direct buffer) (`anvil-api-ADR-007`,
+     * `REQ-RTP-S-005`).
+     *
+     * <p>The I/O thread constructs this view in $O(1)$ without copying the chunk payload or decoding
+     * metadata; worker threads call {@link #decode()} once to parse the section directory, effective
+     * runtime palette map, and {@link LcaDecodedChunkMeta} using thread-local scratch, then slice
+     * every non-uniform Mode A section directly out of {@code slabBuf} with zero heap {@code byte[]}
+     * copies.</p>
+     */
+    public static final class DirectOffHeapChunkView {
+        private final ByteBuffer slabBuf;
+        private final int chunkOffset;
+        private final int chunkLength;
+        private final int rx;
+        private final int rz;
+        private final LcaSectionCodec.ParsedHeaderAndDict dict;
+        private final int[] dictIdToRuntimeId;
+        private final java.util.function.Function<String, Integer> runtimeStateLookup;
+
+        private volatile boolean decoded;
+        private int dataVersion;
+        private int chunkFlags;
+        private int residualNbtRelOffset;
+        private int residualRelStart;
+        private static final java.util.concurrent.atomic.AtomicLong HEAP_CHUNK_STAGING_COPIES =
+                new java.util.concurrent.atomic.AtomicLong();
+
+        private int[] sectionEntries;
+        private int[] sectionRelStarts;
+        private int[] palMap;
+        private LcaDecodedChunkMeta directMeta;
+        private LcaModeABlockSection.OffHeapModeASlice[] preboundSlices;
+        private int[] nonInlineUniformRuntimeIds;
+
+        DirectOffHeapChunkView(
+                ByteBuffer slabBuf,
+                int chunkOffset,
+                int chunkLength,
+                int rx,
+                int rz,
+                LcaSectionCodec.ParsedHeaderAndDict dict,
+                int[] dictIdToRuntimeId,
+                java.util.function.Function<String, Integer> runtimeStateLookup
+        ) {
+            this.slabBuf = slabBuf;
+            this.chunkOffset = chunkOffset;
+            this.chunkLength = chunkLength;
+            this.rx = rx;
+            this.rz = rz;
+            this.dict = dict;
+            this.dictIdToRuntimeId = dictIdToRuntimeId;
+            this.runtimeStateLookup = runtimeStateLookup;
+        }
+
+        /**
+         * Returns the cumulative count of legacy full-chunk heap copies performed via
+         * {@link #materializeSnapshot()}; stays {@code 0} on the direct off-heap {@link #bind()}
+         * path (`anvil-api-ADR-007`).
+         */
+        public static long totalHeapChunkStagingCopies() {
+            return HEAP_CHUNK_STAGING_COPIES.get();
+        }
+
+        /**
+         * Binds chunk metadata, section directory offsets, inline {@code CBIT T5/T6/T6b}
+         * verification, single-pass {@code paletteVoxelCounts}, and zero-copy
+         * {@link LcaModeABlockSection.OffHeapModeASlice} views directly over the off-heap
+         * {@link ByteBuffer} in one L1-cache-resident pass with zero heap chunk staging copy
+         * (`anvil-api-ADR-007`).
+         */
+        public DirectOffHeapChunkView bind() throws IOException {
+            if (decoded) {
+                return this;
+            }
+            synchronized (this) {
+                if (decoded) {
+                    return this;
+                }
+                int sectionCount = dict.sectionCount;
+                int sectionDirEnd = 24 + (sectionCount << 1);
+                if (chunkLength < sectionDirEnd) {
+                    throw new CorruptRegionEntryException(
+                            "CBIT T5: Off-heap ChunkFrame too short (" + chunkLength + " < " + sectionDirEnd + ")");
+                }
+
+                int rawDvWord = LcaSectionCodec.readIntBEBuffer(slabBuf, chunkOffset);
+                int dv = decodeAndVerifySelfDescribingChunkHeader(rawDvWord, rx, rz);
+                long lastUpdateTick = LcaSectionCodec.readLongBEBuffer(slabBuf, chunkOffset + 4);
+                long inhabitedTimeTicks = LcaSectionCodec.readLongBEBuffer(slabBuf, chunkOffset + 12);
+                int statusOrdinal = slabBuf.get(chunkOffset + 20) & 0xFF;
+                int flags = slabBuf.get(chunkOffset + 21) & 0xFF;
+                int resRelOff = LcaSectionCodec.readUint16BEBuffer(slabBuf, chunkOffset + 22);
+                boolean hasRes = (flags & 1) != 0;
+                boolean scale4B = (flags & 4) != 0;
+                int resStart = hasRes
+                        ? Math.min(chunkLength, sectionDirEnd + (resRelOff << (scale4B ? 2 : 0)))
+                        : chunkLength;
+
+                int[] entries = new int[sectionCount];
+                int[] relStarts = computeSectionRelStartsFromBuffer(
+                        slabBuf, chunkOffset, chunkLength, sectionCount, sectionDirEnd, resStart, scale4B,
+                        entries, new int[sectionCount]);
+
+                LcaModeABlockSection.OffHeapModeASlice[] slices =
+                        new LcaModeABlockSection.OffHeapModeASlice[sectionCount];
+                int[] nonInlineUniforms = new int[sectionCount];
+                java.util.Arrays.fill(nonInlineUniforms, -1);
+                int[][] effectivePalBox = new int[1][];
+                LcaDecodedChunkMeta meta;
+                try {
+                    meta = LcaSectionCodec.bindChunkMetadataDirectFromBuffer(
+                            dict, slabBuf, chunkOffset, chunkLength, dv, lastUpdateTick, inhabitedTimeTicks,
+                            statusOrdinal, flags, resStart, rx, rz, entries, relStarts,
+                            dictIdToRuntimeId, slices, nonInlineUniforms, effectivePalBox);
+                } catch (CorruptRegionEntryException ex) {
+                    throw ex;
+                } catch (RuntimeException ex) {
+                    CorruptRegionEntryException corrupt = new CorruptRegionEntryException(
+                            "CBIT T5: Direct off-heap chunk metadata bind failed: " + ex.getMessage());
+                    corrupt.initCause(ex);
+                    throw corrupt;
+                }
+
+                this.dataVersion = dv;
+                this.chunkFlags = flags;
+                this.residualNbtRelOffset = resRelOff;
+                this.residualRelStart = resStart;
+                this.sectionEntries = entries;
+                this.sectionRelStarts = relStarts;
+                this.palMap = effectivePalBox[0];
+                this.preboundSlices = slices;
+                this.nonInlineUniformRuntimeIds = nonInlineUniforms;
+                this.directMeta = meta;
+                this.decoded = true;
+                return this;
+            }
+        }
+
+        /**
+         * Compatibility alias for {@link #bind()}; binds directly over the off-heap
+         * {@link ByteBuffer} without copying the chunk frame to the Java heap.
+         */
+        public DirectOffHeapChunkView decode() throws IOException {
+            return bind();
+        }
+
+        public boolean isBoundDirectlyOffHeap() {
+            ensureDecodedUnchecked();
+            return slabBuf.isDirect() && directMeta != null;
+        }
+
+        private void ensureDecodedUnchecked() {
+            if (!decoded) {
+                try {
+                    bind();
+                } catch (IOException e) {
+                    throw new java.io.UncheckedIOException(e);
+                }
+            }
+        }
+
+        public int rx() {
+            return rx;
+        }
+
+        public int rz() {
+            return rz;
+        }
+
+        public int dataVersion() {
+            ensureDecodedUnchecked();
+            return dataVersion;
+        }
+
+        public int minSectionY() {
+            return dict.minSectionY;
+        }
+
+        public int sectionCount() {
+            return dict.sectionCount;
+        }
+
+        public int chunkLength() {
+            return chunkLength;
+        }
+
+        public int chunkFlags() {
+            ensureDecodedUnchecked();
+            return chunkFlags;
+        }
+
+        public boolean hasSlabLocalPalette() {
+            ensureDecodedUnchecked();
+            return (chunkFlags & 2) != 0;
+        }
+
+        public boolean hasResidualNbt() {
+            ensureDecodedUnchecked();
+            return (chunkFlags & 1) != 0;
+        }
+
+        public boolean hasIsLightOn() {
+            ensureDecodedUnchecked();
+            if ((chunkFlags & 1) == 0 || residualRelStart + 2 > chunkLength) {
+                return false;
+            }
+            int bpFlags = ((slabBuf.get(chunkOffset + residualRelStart) & 0xFF) << 8)
+                    | (slabBuf.get(chunkOffset + residualRelStart + 1) & 0xFF);
+            return (bpFlags & 8) != 0;
+        }
+
+        public LcaDecodedChunkMeta directMeta() {
+            ensureDecodedUnchecked();
+            return directMeta;
+        }
+
+        public int sectionDirectoryEntry16(int sectionIndex) {
+            ensureDecodedUnchecked();
+            return sectionEntries[sectionIndex];
+        }
+
+        public int resolveInlineUniformRuntimeStateId(int sectionIndex) {
+            ensureDecodedUnchecked();
+            int entry16 = sectionEntries[sectionIndex];
+            if (entry16 == 0 || (entry16 & 0x8000) == 0) {
+                return 0;
+            }
+            int paletteIdx = ((chunkFlags & 2) != 0) ? (entry16 & 0x07FF) : (entry16 & 0x1FFF);
+            return (palMap != null && paletteIdx >= 0 && paletteIdx < palMap.length) ? palMap[paletteIdx] : paletteIdx;
+        }
+
+        /**
+         * Resolves the runtime block state ID for any uniform section — whether stored inline in
+         * the 16-bit section directory or as a non-inline {@code BLOCK_MODE_UNIFORM} section frame
+         * (e.g., uniform blocks with non-constant light). Returns {@code -1} for non-uniform
+         * Mode A sections.
+         */
+        public int resolveUniformRuntimeStateId(int sectionIndex) {
+            ensureDecodedUnchecked();
+            if (sectionIndex < 0 || sectionIndex >= dict.sectionCount) {
+                return -1;
+            }
+            int entry16 = sectionEntries[sectionIndex];
+            if (entry16 == 0 || (entry16 & 0x8000) != 0) {
+                return resolveInlineUniformRuntimeStateId(sectionIndex);
+            }
+            return nonInlineUniformRuntimeIds != null ? nonInlineUniformRuntimeIds[sectionIndex] : -1;
+        }
+
+        /**
+         * Slices a non-uniform Mode A block section directly out of the backing direct off-heap
+         * {@link ByteBuffer} with zero heap {@code byte[]} copy (`anvil-api-ADR-007`).
+         */
+        @SuppressWarnings("java:S1168")
+        public LcaModeABlockSection.OffHeapModeASlice trySliceOffHeapModeASection(int sectionIndex) {
+            ensureDecodedUnchecked();
+            if (sectionIndex < 0 || sectionIndex >= dict.sectionCount) {
                 return null;
             }
-            header = revalidateFileHeader(regionFile, mtime);
-            if (header != null) {
-                cachedHeader = true;
-            } else {
-                header = loadFileHeader(regionFile, channel, mtime);
-                if (header == null) return null;
+            if (preboundSlices != null && preboundSlices[sectionIndex] != null) {
+                return preboundSlices[sectionIndex];
             }
+            if (palMap == null) {
+                return null;
+            }
+            int entry16 = sectionEntries[sectionIndex];
+            if (entry16 == 0 || (entry16 & 0x8000) != 0) {
+                return null;
+            }
+            int relStart = sectionRelStarts[sectionIndex];
+            if (relStart < 0 || relStart >= chunkLength) {
+                return null;
+            }
+            int relEnd = LcaSectionCodec.findSectionRelEnd(
+                    sectionRelStarts, sectionIndex, dict.sectionCount, residualRelStart, chunkLength);
+            if (relEnd <= relStart || relEnd > chunkLength) {
+                return null;
+            }
+            return LcaModeABlockSection.trySliceOffHeapFromBuffer(
+                    slabBuf, chunkOffset + relStart, chunkOffset + relEnd, palMap);
         }
-        while (true) {
-            try {
-                if (!header.isOccupied(rx, rz)) {
-                    return null;
-                }
-                ChunkSlabView snap = readSlabFromChannel(channel, header, rx, rz);
-                if (snap == null) return null;
-                LcaSectionCodec.ParsedHeaderAndDict dict = header.ensureParsedDict(channel);
-                int[] dictIdToRuntimeId = header.resolveDictIdToRuntimeId(dict, runtimeStateLookup);
-                return buildRawChunkFrameSnapshot(dict, snap, rx, rz, dictIdToRuntimeId);
-            } catch (CorruptRegionEntryException e) {
-                if (cachedHeader) {
-                    cachedHeader = false;
-                    long mtime = fileMtimeOrMinusOne(regionFile);
-                    if (mtime < 0L) {
+
+        /**
+         * Materializes a legacy heap {@link RawChunkFrameSnapshot} only when a caller hits an
+         * unsupported section encoding or explicit fallback path.
+         */
+        public RawChunkFrameSnapshot materializeSnapshot() {
+            ensureDecodedUnchecked();
+            HEAP_CHUNK_STAGING_COPIES.incrementAndGet();
+            byte[] copy = new byte[chunkLength];
+            slabBuf.get(chunkOffset, copy, 0, chunkLength);
+            return new RawChunkFrameSnapshot(
+                    copy, dataVersion, dict.minSectionY, dict.sectionCount,
+                    residualNbtRelOffset, dictIdToRuntimeId, dict.formatVersion);
+        }
+    }
+
+    /**
+     * Constructs an $O(1)$ zero-copy {@link DirectOffHeapChunkView} backed by a direct off-heap
+     * read-ahead region {@link ByteBuffer} (`anvil-api-ADR-007`, `REQ-RTP-S-005`). Returns
+     * {@code null} when the chunk is absent or stored in Mode B (`codec1 != 0`).
+     */
+    @SuppressWarnings("java:S1168")
+    static DirectOffHeapChunkView readDirectOffHeapChunkViewFromDirectBuffer(
+            CachedFileHeader header,
+            FileChannel channel,
+            ByteBuffer directRegionBuf,
+            int rx,
+            int rz,
+            java.util.function.Function<String, Integer> runtimeStateLookup
+    ) throws IOException {
+        validateCoordinates(rx, rz);
+        if (header == null || directRegionBuf == null || !header.isOccupied(rx, rz)) {
+            return null;
+        }
+        long ptr = header.pointer(rx, rz);
+        long slabOffset35 = ptr >>> 29;
+        int codec1 = (int) ((ptr >>> 28) & 1L);
+        int exactByteLen20 = (int) ((ptr >>> 8) & 0xFFFFFL);
+        if (slabOffset35 == 0 || exactByteLen20 == 0 || codec1 != 0) {
+            return null;
+        }
+        long payloadStartOffset = slabOffset35 << SLAB_SHIFT;
+        if (payloadStartOffset < DICT_ROOT_OFFSET
+                || exactByteLen20 > MAX_CHUNK_UNCOMPRESSED_BYTES
+                || payloadStartOffset + exactByteLen20 > directRegionBuf.limit() - FOOTER_SIZE) {
+            throw new CorruptRegionEntryException(
+                    "CBIT T3/T4: Direct off-heap chunk pointer (" + rx + "," + rz + ") out of bounds");
+        }
+        LcaSectionCodec.ParsedHeaderAndDict dict = header.ensureParsedDict(channel);
+        int[] dictIdToRuntimeId = header.resolveDictIdToRuntimeId(dict, runtimeStateLookup);
+        return new DirectOffHeapChunkView(
+                directRegionBuf,
+                (int) payloadStartOffset,
+                exactByteLen20,
+                rx,
+                rz,
+                dict,
+                dictIdToRuntimeId,
+                runtimeStateLookup);
+    }
+
+    /**
+     * Decodes a single chunk's vanilla binary NBT bytes directly from an already-promoted
+     * off-heap region {@link ByteBuffer} without allocating a duplicate heap {@code byte[fileSize]}
+     * read-ahead cache (`anvil-api-ADR-007`).
+     */
+    static byte[] readChunkNbtBytesFromDirectBuffer(
+            CachedFileHeader header,
+            FileChannel channel,
+            ByteBuffer directRegionBuf,
+            int rx,
+            int rz
+    ) throws IOException {
+        validateCoordinates(rx, rz);
+        if (header == null || directRegionBuf == null || !header.isOccupied(rx, rz)) {
+            return null;
+        }
+        int chunkIdx = (rx & 31) | ((rz & 31) << 5);
+        int ptrByteOffset = POINTER_DIRECTORY_OFFSET + (chunkIdx << 3);
+        long ptr = header.pointer(rx, rz);
+        long slabOffset35 = ptr >>> 29;
+        int codec1 = (int) ((ptr >>> 28) & 1L);
+        int exactByteLen20 = (int) ((ptr >>> 8) & 0xFFFFFL);
+        int generation8 = (int) (ptr & 0xFFL);
+        if (slabOffset35 == 0 || exactByteLen20 == 0) {
+            return null;
+        }
+        long payloadStartOffset = slabOffset35 << SLAB_SHIFT;
+        if (payloadStartOffset < DICT_ROOT_OFFSET
+                || exactByteLen20 > MAX_CHUNK_UNCOMPRESSED_BYTES
+                || payloadStartOffset + exactByteLen20 > directRegionBuf.limit() - FOOTER_SIZE) {
+            throw new CorruptRegionEntryException(
+                    "CBIT T3/T4: Direct off-heap chunk pointer (" + rx + "," + rz + ") out of bounds");
+        }
+        int hazardSlot = pinHazardSlab((int) slabOffset35);
+        try {
+            byte[] scratch = FILE_SCRATCH.get();
+            if (scratch.length < exactByteLen20) {
+                scratch = new byte[Math.max(exactByteLen20, scratch.length * 2)];
+                FILE_SCRATCH.set(scratch);
+            }
+            directRegionBuf.get((int) payloadStartOffset, scratch, 0, exactByteLen20);
+            ChunkSlabView snap;
+            if (codec1 == 1) {
+                byte[] slabCopy = Arrays.copyOf(scratch, exactByteLen20);
+                snap = buildSlabViewFromCopy(
+                        rx, rz, ptrByteOffset, ptr, codec1, exactByteLen20, generation8,
+                        slabCopy, header.sb.sectionCount, null);
+            } else {
+                snap = new ChunkSlabView(
+                        rx, rz, ptrByteOffset, ptr, codec1, exactByteLen20, generation8,
+                        scratch, 0, exactByteLen20);
+            }
+            LcaSectionCodec.ParsedHeaderAndDict dict = header.ensureParsedDict(channel);
+            return encodeChunkNbtBytesFromFrame(dict, snap, rx, rz);
+        } finally {
+            unpinHazardSlab(hazardSlot);
+        }
+    }
+
+    /**
+     * Reads a single Mode A chunk slab directly into an off-heap direct {@link ByteBuffer} from
+     * a positional {@link FileChannel} without a heap intermediate buffer (`anvil-api-ADR-007`,
+     * `REQ-RTP-S-005`). Returns {@code null} if the chunk is absent or Mode B (`codec1 != 0`).
+     */
+    @SuppressWarnings("java:S1168")
+    public static DirectOffHeapChunkView readDirectOffHeapChunkViewFromChannel(
+            Path regionFile,
+            FileChannel channel,
+            int rx,
+            int rz,
+            java.util.function.Function<String, Integer> runtimeStateLookup
+    ) throws IOException {
+        return readFromChannelWithRetry(
+                regionFile,
+                channel,
+                rx,
+                rz,
+                () -> {
+                    if (regionFile == null) {
+                        return null;
+                    }
+                    try (FileChannel ch = FileChannel.open(regionFile, StandardOpenOption.READ)) {
+                        return readDirectOffHeapChunkViewFromChannel(regionFile, ch, rx, rz, runtimeStateLookup);
+                    } catch (NoSuchFileException e) {
                         invalidateFileCache(regionFile);
                         return null;
                     }
-                    header = loadFileHeader(regionFile, channel, mtime);
-                    if (header == null) return null;
-                    continue;
-                }
-                throw e;
-            }
+                },
+                header -> {
+                    long ptr = header.pointer(rx, rz);
+                    long slabOffset35 = ptr >>> 29;
+                    int codec1 = (int) ((ptr >>> 28) & 1L);
+                    int exactByteLen20 = (int) ((ptr >>> 8) & 0xFFFFFL);
+                    if (slabOffset35 == 0 || exactByteLen20 == 0 || codec1 != 0) {
+                        return null;
+                    }
+                    long payloadStartOffset = slabOffset35 << SLAB_SHIFT;
+                    if (payloadStartOffset < DICT_ROOT_OFFSET
+                            || exactByteLen20 > MAX_CHUNK_UNCOMPRESSED_BYTES
+                            || payloadStartOffset + exactByteLen20 > header.fileSize - FOOTER_SIZE) {
+                        throw new CorruptRegionEntryException(
+                                "CBIT T3/T4: Direct off-heap chunk pointer (" + rx + "," + rz + ") out of bounds");
+                    }
+                    ByteBuffer directBuf = ByteBuffer.allocateDirect(exactByteLen20);
+                    int hazardSlot = pinHazardSlab((int) slabOffset35);
+                    try {
+                        long pos = payloadStartOffset;
+                        while (directBuf.hasRemaining()) {
+                            int n = channel.read(directBuf, pos);
+                            if (n < 0) {
+                                throw new CorruptRegionEntryException(
+                                        "CBIT T3: Unexpected EOF reading direct off-heap chunk (" + rx + "," + rz + ")");
+                            }
+                            pos += n;
+                        }
+                    } finally {
+                        unpinHazardSlab(hazardSlot);
+                    }
+                    directBuf.flip();
+                    LcaSectionCodec.ParsedHeaderAndDict dict = header.ensureParsedDict(channel);
+                    int[] dictIdToRuntimeId = header.resolveDictIdToRuntimeId(dict, runtimeStateLookup);
+                    return new DirectOffHeapChunkView(
+                            directBuf,
+                            0,
+                            exactByteLen20,
+                            rx,
+                            rz,
+                            dict,
+                            dictIdToRuntimeId,
+                            runtimeStateLookup);
+                });
+    }
+
+    @SuppressWarnings("java:S1168")
+    static byte[] encodeChunkMetadataNbtBytesFromSnapshot(
+            LcaSectionCodec.ParsedHeaderAndDict meta,
+            RawChunkFrameSnapshot snapshot,
+            int rx,
+            int rz,
+            boolean omitBlockStates
+    ) throws IOException {
+        byte[] frame = snapshot.chunkFrame();
+        int frameLen = frame.length;
+        if (frameLen < 24) {
+            throw new CorruptRegionEntryException("CBIT T5: ChunkFrame too short (" + frameLen + " < 24)");
         }
+        int chunkDataVersion = snapshot.dataVersion();
+        long lastUpdateTick = snapshot.lastUpdateTick();
+        long inhabitedTimeTicks = snapshot.inhabitedTimeTicks();
+        int statusOrdinal = snapshot.statusOrdinal();
+        int chunkFlags = snapshot.chunkFlags();
+        boolean scale4B = (chunkFlags & 4) != 0;
+        int sectionCount = meta.sectionCount;
+        int sectionDirEnd = 24 + (sectionCount << 1);
+        int residualRelStart = snapshot.residualRelStart();
+
+        LcaSectionCodec.ScratchArena arena = LcaSectionCodec.scratch();
+        int[] sectionEntries = arena.sectionEntries;
+        int[] sectionRelStarts = computeSectionRelStarts(
+                frame, 0, frameLen, sectionCount, sectionDirEnd, residualRelStart, scale4B,
+                sectionEntries, arena.sectionRelStarts);
+
+        return LcaSectionCodec.encodeChunkFrameToNbtBytes(
+                meta, frame, 0, frameLen, chunkDataVersion, lastUpdateTick, inhabitedTimeTicks,
+                statusOrdinal, chunkFlags, residualRelStart, rx, rz, sectionEntries, sectionRelStarts,
+                omitBlockStates);
+    }
+
+    /**
+     * Off-thread single-read `.lca` `ChunkFrame` + metadata-only NBT file reader (`REQ-RTP-S-005`).
+     */
+    @SuppressWarnings("java:S1168")
+    public static RawChunkFrameWithMetadata readRawChunkFrameWithMetadataFromFile(
+            Path regionFile,
+            int rx,
+            int rz,
+            java.util.function.Function<String, Integer> runtimeStateLookup
+    ) throws IOException {
+        if (regionFile == null) return null;
+        try (FileChannel ch = FileChannel.open(regionFile, StandardOpenOption.READ)) {
+            return readRawChunkFrameWithMetadataFromChannel(regionFile, ch, rx, rz, runtimeStateLookup);
+        } catch (NoSuchFileException e) {
+            invalidateFileCache(regionFile);
+            return null;
+        }
+    }
+
+    /**
+     * Off-thread positional `FileChannel` single-read `.lca` `ChunkFrame` + metadata-only NBT reader
+     * (`REQ-RTP-S-005`). Decompresses the chunk slab once to produce both {@link RawChunkFrameSnapshot}
+     * and metadata NBT with section {@code block_states} omitted.
+     */
+    @SuppressWarnings("java:S1168")
+    public static RawChunkFrameWithMetadata readRawChunkFrameWithMetadataFromChannel(
+            Path regionFile,
+            FileChannel channel,
+            int rx,
+            int rz,
+            java.util.function.Function<String, Integer> runtimeStateLookup
+    ) throws IOException {
+        return readFromChannelWithRetry(
+                regionFile,
+                channel,
+                rx,
+                rz,
+                () -> readRawChunkFrameWithMetadataFromFile(regionFile, rx, rz, runtimeStateLookup),
+                header -> {
+                    ChunkSlabView snap = readSlabFromChannel(channel, header, rx, rz);
+                    if (snap == null) return null;
+                    LcaSectionCodec.ParsedHeaderAndDict dict = header.ensureParsedDict(channel);
+                    int[] dictIdToRuntimeId = header.resolveDictIdToRuntimeId(dict, runtimeStateLookup);
+                    RawChunkFrameSnapshot frame = buildRawChunkFrameSnapshot(dict, snap, rx, rz, dictIdToRuntimeId);
+                    byte[] metadataNbt = encodeChunkMetadataNbtBytesFromSnapshot(dict, frame, rx, rz, true);
+                    return new RawChunkFrameWithMetadata(frame, metadataNbt);
+                });
+    }
+
+    /**
+     * Off-thread single-read `.lca` `ChunkFrame` + metadata-only NBT reader backed by a prefetched
+     * sequential read-ahead region byte array (`REQ-RTP-S-005`), avoiding per-chunk `FileChannel`
+     * read syscalls while reusing {@link CachedFileHeader}'s parsed dictionary and runtime-ID map.
+     */
+    @SuppressWarnings("java:S1168")
+    static RawChunkFrameWithMetadata readRawChunkFrameWithMetadataFromBytes(
+            CachedFileHeader header,
+            FileChannel channel,
+            byte[] regionBytes,
+            int rx,
+            int rz,
+            java.util.function.Function<String, Integer> runtimeStateLookup
+    ) throws IOException {
+        validateCoordinates(rx, rz);
+        if (header == null || regionBytes == null) {
+            return null;
+        }
+        if (!header.isOccupied(rx, rz)) {
+            return null;
+        }
+        LcaSectionCodec.ParsedHeaderAndDict dict = header.ensureParsedDict(channel);
+        ChunkSlabView snap = INSTANCE.resolveChunkSlab(
+                regionBytes, regionBytes.length, dict.sectionCount, rx, rz, false, null);
+        if (snap == null) {
+            return null;
+        }
+        int[] dictIdToRuntimeId = header.resolveDictIdToRuntimeId(dict, runtimeStateLookup);
+        RawChunkFrameSnapshot frame = buildRawChunkFrameSnapshot(dict, snap, rx, rz, dictIdToRuntimeId);
+        byte[] metadataNbt = encodeChunkMetadataNbtBytesFromSnapshot(dict, frame, rx, rz, true);
+        return new RawChunkFrameWithMetadata(frame, metadataNbt);
     }
 
     public static AnvilChunkView readChunkViewFromFile(Path regionFile, int rx, int rz) throws IOException {
@@ -2768,9 +3980,12 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
                         throw new CorruptRegionEntryException("CBIT T5: ChunkFrame too short (" + snap.frameLength + ")");
                     }
                     boolean hasSlabLocalPalette = (snap.frameBytes[snap.frameOffset + 21] & 2) != 0;
-                    LcaSectionCodec.ParsedHeaderAndDict dict = (hasSlabLocalPalette && !snap.modeBBodyDeferred)
-                            ? null
-                            : header.ensureParsedDict(channel);
+                    LcaSectionCodec.ParsedHeaderAndDict dict =
+                            (header.sb.formatVersion < LCA_FORMAT_VERSION_V3
+                                    && hasSlabLocalPalette
+                                    && !snap.modeBBodyDeferred)
+                                    ? null
+                                    : header.ensureParsedDict(channel);
                     return decodeWindowToViewOrProbe(
                             null, 0, header.sb, dict, snap, minY, maxY, decodeBiomes, decodeHeightmap, null);
                 } catch (CorruptRegionEntryException e) {
@@ -2992,6 +4207,9 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
 
         CachedFileHeader h = new CachedFileHeader(
                 headerBytes, secDedBytes, new SuperblockFastMeta(formatVersion, minSectionY, sectionCount), mtime, fileSize, System.nanoTime());
+        if (FILE_HEADER_CACHE.size() >= FILE_HEADER_CACHE_CAPACITY) {
+            evictFileHeaderCacheIfNeeded();
+        }
         if (FILE_HEADER_CACHE.put(normKey, h) == null) {
             FILE_HEADER_CLOCK_QUEUE.offer(normKey);
         }
@@ -3042,11 +4260,18 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
         int defaultDataVersion = LcaSectionCodec.readIntBE(headerBytes, 0x1C);
         long slabPoolBaseOffset = (long) LONG_BE_VIEW.get(headerBytes, 0x30);
 
+        boolean factoredV3 = sb.formatVersion >= LCA_FORMAT_VERSION_V3;
         List<String> canonicalStates = new ArrayList<>(256);
         List<String> baseBlockNames = new ArrayList<>(256);
         List<List<String>> singletonBasePalettes = new ArrayList<>(256);
         List<String> biomes = new ArrayList<>(16);
         List<List<String>> singletonBiomePalettes = new ArrayList<>(16);
+        List<String> v3BaseBlockTable = factoredV3 ? new ArrayList<>(128) : null;
+        List<List<String>> v3BaseBlockSingletons = factoredV3 ? new ArrayList<>(128) : null;
+        List<String> v3PropTupleTable = factoredV3 ? new ArrayList<>(128) : null;
+        DictIntList v3StateBaseIds = factoredV3 ? new DictIntList(256) : null;
+        DictIntList v3StatePropIds = factoredV3 ? new DictIntList(256) : null;
+        DictIntList v3StateMatPacked = factoredV3 ? new DictIntList(256) : null;
         ByteArrayOutputStream patternArenaOut = null;
 
         int segOffset = rootDictOffset;
@@ -3073,46 +4298,14 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
                 }
             }
 
-            int segStateCount = LcaSectionCodec.readIntBE(segBuf, 0);
-            int segBiomeCount = LcaSectionCodec.readUint16BE(segBuf, 4);
             int usedPayloadBytes = LcaSectionCodec.readUint16BE(segBuf, 6);
-            if (segStateCount < 0 || segStateCount > 65536
-                    || segBiomeCount < 0 || segBiomeCount > 16384
-                    || 8 + usedPayloadBytes > segPayloadLimit) {
-                throw new CorruptRegionEntryException("CBIT T5: Dictionary segment header corrupt");
-            }
-
-            int pos = 8;
-            for (int i = 0; i < segStateCount; i++) {
-                int utfLen = LcaSectionCodec.readVarInt(segBuf, pos, segPayloadLimit);
-                pos += LcaSectionCodec.varIntLen(utfLen);
-                if (utfLen < 0 || pos + utfLen + 4 > segPayloadLimit) {
-                    throw new CorruptRegionEntryException("CBIT T5: Truncated dictionary BlockState entry");
-                }
-                String canonical = new String(segBuf, pos, utfLen, StandardCharsets.UTF_8);
-                pos += utfLen + 4;
-                String baseName = LcaSectionCodec.stripBlockProperties(canonical);
-                canonicalStates.add(canonical);
-                baseBlockNames.add(baseName);
-                singletonBasePalettes.add(List.of(baseName));
-            }
-
-            for (int i = 0; i < segBiomeCount; i++) {
-                int utfLen = LcaSectionCodec.readVarInt(segBuf, pos, segPayloadLimit);
-                pos += LcaSectionCodec.varIntLen(utfLen);
-                if (utfLen < 0 || pos + utfLen + 4 > segPayloadLimit) {
-                    throw new CorruptRegionEntryException("CBIT T5: Truncated dictionary Biome entry");
-                }
-                String biomeId = new String(segBuf, pos, utfLen, StandardCharsets.UTF_8);
-                pos += utfLen + 4;
-                biomes.add(biomeId);
-                singletonBiomePalettes.add(List.of(biomeId));
-            }
-
             int activeEnd = 8 + usedPayloadBytes;
-            if (pos > activeEnd) {
-                throw new CorruptRegionEntryException("CBIT T5: Dictionary entries exceed usedPayloadBytes");
-            }
+            int pos = parseDictSegmentEntries(
+                    segBuf, 0, segCap, sb.formatVersion,
+                    canonicalStates, baseBlockNames, singletonBasePalettes,
+                    biomes, singletonBiomePalettes,
+                    v3BaseBlockTable, v3BaseBlockSingletons, v3PropTupleTable,
+                    v3StateBaseIds, v3StatePropIds, v3StateMatPacked);
             if (pos < activeEnd) {
                 if (patternArenaOut == null) {
                     patternArenaOut = new ByteArrayOutputStream(Math.max(512, activeEnd - pos));
@@ -3132,17 +4325,32 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
         byte[] patternArenaBytes = patternArenaOut == null
                 ? LcaSectionCodec.EMPTY_BYTES
                 : patternArenaOut.toByteArray();
-        return new LcaSectionCodec.ParsedHeaderAndDict(
-                sb.formatVersion,
-                storageKind, regionX, regionZ, sb.minSectionY, sb.sectionCount, defaultDataVersion,
-                flags, slabPoolBaseOffset,
-                Collections.unmodifiableList(canonicalStates),
-                Collections.unmodifiableList(baseBlockNames),
-                Collections.unmodifiableList(singletonBasePalettes),
-                Collections.unmodifiableList(biomes),
-                Collections.unmodifiableList(singletonBiomePalettes),
-                patternArenaBytes
-        );
+        return factoredV3
+                ? new LcaSectionCodec.ParsedHeaderAndDict(
+                        sb.formatVersion,
+                        storageKind, regionX, regionZ, sb.minSectionY, sb.sectionCount, defaultDataVersion,
+                        flags, slabPoolBaseOffset,
+                        Collections.unmodifiableList(canonicalStates),
+                        Collections.unmodifiableList(baseBlockNames),
+                        Collections.unmodifiableList(singletonBasePalettes),
+                        Collections.unmodifiableList(biomes),
+                        Collections.unmodifiableList(singletonBiomePalettes),
+                        patternArenaBytes,
+                        v3BaseBlockTable.toArray(new String[0]),
+                        v3PropTupleTable.toArray(new String[0]),
+                        v3StateBaseIds.toArray(),
+                        v3StatePropIds.toArray(),
+                        v3StateMatPacked.toArray())
+                : new LcaSectionCodec.ParsedHeaderAndDict(
+                        sb.formatVersion,
+                        storageKind, regionX, regionZ, sb.minSectionY, sb.sectionCount, defaultDataVersion,
+                        flags, slabPoolBaseOffset,
+                        Collections.unmodifiableList(canonicalStates),
+                        Collections.unmodifiableList(baseBlockNames),
+                        Collections.unmodifiableList(singletonBasePalettes),
+                        Collections.unmodifiableList(biomes),
+                        Collections.unmodifiableList(singletonBiomePalettes),
+                        patternArenaBytes);
     }
 
     private static ChunkSlabView readSlabFromChannel(
@@ -3166,22 +4374,27 @@ public final class LcaRegionReader implements RegionFileReader, BuiltInTestable 
             throw new CorruptRegionEntryException("CBIT T3/T4: Chunk pointer (" + rx + "," + rz + ") out of bounds");
         }
 
-        byte[] scratch = FILE_SCRATCH.get();
-        if (scratch.length < exactByteLen20) {
-            scratch = new byte[Math.max(exactByteLen20, scratch.length * 2)];
-            FILE_SCRATCH.set(scratch);
-        }
-        readChannelFully(ch, scratch, 0, exactByteLen20, payloadStartOffset, null);
+        int hazardSlot = pinHazardSlab((int) slabOffset35);
+        try {
+            byte[] scratch = FILE_SCRATCH.get();
+            if (scratch.length < exactByteLen20) {
+                scratch = new byte[Math.max(exactByteLen20, scratch.length * 2)];
+                FILE_SCRATCH.set(scratch);
+            }
+            readChannelFully(ch, scratch, 0, exactByteLen20, payloadStartOffset, null);
 
-        if (codec1 == 1) {
-            byte[] slabCopy = Arrays.copyOf(scratch, exactByteLen20);
-            return buildSlabViewFromCopy(
+            if (codec1 == 1) {
+                byte[] slabCopy = Arrays.copyOf(scratch, exactByteLen20);
+                return buildSlabViewFromCopy(
+                        rx, rz, ptrByteOffset, ptr, codec1, exactByteLen20, generation8,
+                        slabCopy, header.sb.sectionCount, null);
+            }
+            return new ChunkSlabView(
                     rx, rz, ptrByteOffset, ptr, codec1, exactByteLen20, generation8,
-                    slabCopy, header.sb.sectionCount, null);
+                    scratch, 0, exactByteLen20);
+        } finally {
+            unpinHazardSlab(hazardSlot);
         }
-        return new ChunkSlabView(
-                rx, rz, ptrByteOffset, ptr, codec1, exactByteLen20, generation8,
-                scratch, 0, exactByteLen20);
     }
 
     private static void readChannelFully(

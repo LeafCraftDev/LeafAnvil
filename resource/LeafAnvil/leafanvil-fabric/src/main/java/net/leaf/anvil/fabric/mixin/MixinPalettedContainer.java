@@ -29,10 +29,10 @@ import java.util.function.Predicate;
  *   <li><b>`ZeroBitStorage` Heap Eviction (`Tier 3`):</b> Evicts vanilla's `SimpleBitStorage`
  *       `long[256..512]` and `Palette` to a shared `0-bit` `ZeroBitStorage` (`long[0]`) shell once
  *       {@link LcaSectionBacking} is attached so the JVM GC reclaims the backing arrays.</li>
- *   <li><b>Multi-block update & AI query interception (`Auditor Gate 2C`):</b> Direct container
+ *   <li><b>Multi-block update &amp; AI query interception (`Auditor Gate 2C`):</b> Direct container
  *       reads, writes, {@code getAndSetUnchecked}, {@code count}, {@code getAll}, and
  *       {@code maybeHas} predicates route through {@link LcaSectionBacking}.</li>
- *   <li><b>Non-pinning `Copy-on-Read` for client meshing, chunk saves & vanilla packets (`Invariant 2`):</b>
+ *   <li><b>Non-pinning `Copy-on-Read` for client meshing, chunk saves &amp; vanilla packets (`Invariant 2`):</b>
  *       {@link PalettedContainer#copy()}, {@code pack}, {@code write}, and {@code getSerializedSize}
  *       materialize transient snapshots from `LcaSectionBacking#materializeEphemeralStateIds` without
  *       permanently pinning `SimpleBitStorage` `long[]` onto the live `LevelChunkSection`.</li>

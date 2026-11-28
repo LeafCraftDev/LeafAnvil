@@ -50,6 +50,8 @@ public final class FabricLeafAnvilClientMod implements ClientModInitializer, Mod
 
     private static volatile CustomPacketPayload.Type<net.leaf.anvil.fabric.FabricLeafAnvilMod.LcaRawCustomPayload> handshakePayloadType;
     private static volatile CustomPacketPayload.Type<net.leaf.anvil.fabric.FabricLeafAnvilMod.LcaRawCustomPayload> chunkBatchPayloadType;
+    private static volatile long cachedRegistryParityHash;
+    private static volatile boolean registryParityHashComputed;
 
     private final LcaClientWireReceiver wireReceiver;
     public FabricLeafAnvilClientMod() {
@@ -146,8 +148,8 @@ public final class FabricLeafAnvilClientMod implements ClientModInitializer, Mod
             ClientLevelCommitBridge.commit(wireReceiver, commit);
         } catch (Throwable t) {
             LOGGER.log(
-                    Level.FINE,
-                    "[LeafAnvil-Client] Optional Fabric ClientLevel main-thread chunk commit skipped: " + t.getMessage(),
+                    Level.WARNING,
+                    "[LeafAnvil-Client] Fabric ClientLevel main-thread chunk commit failed: " + t.getMessage(),
                     t
             );
         }
@@ -162,9 +164,24 @@ public final class FabricLeafAnvilClientMod implements ClientModInitializer, Mod
             if (mc == null) {
                 return;
             }
-            mc.execute(() -> {
+            Runnable apply = () -> {
                 net.minecraft.client.multiplayer.ClientLevel level = mc.level;
-                if (level == null || !level.getChunkSource().hasChunk(commit.chunkX(), commit.chunkZ())) {
+                if (level == null) {
+                    return;
+                }
+                if (level.getChunkSource() instanceof LcaClientChunkInstaller installer) {
+                    installer.leafanvil$installOrUpdateLcaChunk(
+                            commit.chunkX(),
+                            commit.chunkZ(),
+                            commit.sectionBackings(),
+                            commit.lastUpdateTick(),
+                            wireReceiver.coordinator(),
+                            commit.dimension(),
+                            commit.heightmapBytes()
+                    );
+                    return;
+                }
+                if (!level.getChunkSource().hasChunk(commit.chunkX(), commit.chunkZ())) {
                     return;
                 }
                 LevelChunk chunk = level.getChunk(commit.chunkX(), commit.chunkZ());
@@ -183,7 +200,12 @@ public final class FabricLeafAnvilClientMod implements ClientModInitializer, Mod
                         sections,
                         commit.lastUpdateTick()
                 );
-            });
+            };
+            if (mc.isSameThread()) {
+                apply.run();
+            } else {
+                mc.execute(apply);
+            }
         }
     }
 
@@ -196,6 +218,9 @@ public final class FabricLeafAnvilClientMod implements ClientModInitializer, Mod
      * (`leafanvil-ADR-003` Section 1).
      */
     public static long computeBlockStateRegistryParityHash() {
+        if (registryParityHashComputed) {
+            return cachedRegistryParityHash;
+        }
         long hash = 0xCBF29CE484222325L;
         int size = Block.BLOCK_STATE_REGISTRY.size();
         hash = (hash ^ size) * 0x100000001B3L;
@@ -203,6 +228,10 @@ public final class FabricLeafAnvilClientMod implements ClientModInitializer, Mod
             BlockState state = Block.stateById(id);
             int actualId = Block.getId(state);
             hash = (hash ^ (((long) id << 32) | (actualId & 0xFFFFFFFFL))) * 0x100000001B3L;
+        }
+        if (size > 0) {
+            cachedRegistryParityHash = hash;
+            registryParityHashComputed = true;
         }
         return hash;
     }
@@ -243,7 +272,8 @@ public final class FabricLeafAnvilClientMod implements ClientModInitializer, Mod
                             if (args != null
                                     && args.length >= 1
                                     && args[0] instanceof net.leaf.anvil.fabric.FabricLeafAnvilMod.LcaRawCustomPayload raw) {
-                                onClientChunkBatchReceived("minecraft:overworld", raw.data(), true);
+                                String dim = resolveClientDimensionId();
+                                onClientChunkBatchReceived(dim, raw.data(), true);
                             }
                             return null;
                         }
@@ -292,6 +322,7 @@ public final class FabricLeafAnvilClientMod implements ClientModInitializer, Mod
                     new Class<?>[]{discIface},
                     (p, m, args) -> {
                         wireReceiver.onClientDisconnect();
+                        LcaClientChunkInstaller.clearPendingLightEnable();
                         return null;
                     }
             );
@@ -305,6 +336,18 @@ public final class FabricLeafAnvilClientMod implements ClientModInitializer, Mod
                     t
             );
         }
+    }
+
+    private static String resolveClientDimensionId() {
+        try {
+            net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
+            if (mc != null && mc.level != null && mc.level.dimension() != null) {
+                return mc.level.dimension().identifier().toString();
+            }
+        } catch (Throwable t) {
+            LOGGER.log(Level.FINE, "[LeafAnvil-Client] Optional client dimension probe unavailable: " + t.getMessage(), t);
+        }
+        return "minecraft:overworld";
     }
 
     public void onClientChunkLoaded(String worldName, LevelChunk chunk) {

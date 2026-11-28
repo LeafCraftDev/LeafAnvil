@@ -1,6 +1,5 @@
 package net.leaf.anvil.common;
 
-import io.github.dailystruggle.anvil.AnvilIoPool;
 import io.github.dailystruggle.anvil.AnvilReader;
 import io.github.dailystruggle.anvil.LcaRegionFileStorage;
 import io.github.dailystruggle.anvil.LcaRegionReader;
@@ -8,9 +7,10 @@ import io.github.dailystruggle.anvil.LcaRegionWriter;
 import io.github.dailystruggle.anvil.LinearRegionReader;
 import io.github.dailystruggle.anvil.RegionFileReader;
 import io.github.dailystruggle.anvil.RegionFormatRegistry;
-import io.github.dailystruggle.rtp.common.predict.BudgetPacer;
-import io.github.dailystruggle.rtp.common.predict.EwmaEstimator;
+import net.leaf.predict.BudgetPacer;
+import net.leaf.predict.EwmaEstimator;
 import io.github.dailystruggle.server.api.ServerAccessor;
+import io.github.dailystruggle.server.api.ServerAccessors;
 import io.github.dailystruggle.server.api.TaskHandle;
 
 import java.io.IOException;
@@ -174,7 +174,7 @@ public final class LeafAnvilWorldConverter {
                     200L,
                     0.0,
                     -1L,
-                    AnvilIoPool.get(),
+                    ServerAccessors.blockingIoExecutor().orElse(Runnable::run),
                     null,
                     () -> 20.0,
                     () -> 0L,
@@ -195,9 +195,14 @@ public final class LeafAnvilWorldConverter {
             int configured = workerOverride > 0 ? workerOverride : cfg.convertWorkerThreads();
             int workers = LeafAnvilConfig.resolveConvertWorkerThreads(
                     configured, LcaInMemoryChunkCoordinator.detectC2mePresent());
-            Executor asyncExecutor = accessor != null && accessor.scheduler().isPresent()
-                    ? task -> accessor.scheduler().get().runAsync(task)
-                    : AnvilIoPool.get();
+            Executor asyncExecutor;
+            if (accessor != null && accessor.scheduler().isPresent()) {
+                asyncExecutor = task -> accessor.scheduler().get().runAsync(task);
+            } else if (runtime != null) {
+                asyncExecutor = runtime.blockingIoExecutor();
+            } else {
+                asyncExecutor = ServerAccessors.blockingIoExecutor().orElse(Runnable::run);
+            }
             BiFunction<Runnable, Long, TaskHandle> timerRegistrar = runtime != null
                     ? (pulse, periodMs) -> {
                         long periodTicks = Math.max(1L, Math.round(periodMs / 50.0));
@@ -260,7 +265,9 @@ public final class LeafAnvilWorldConverter {
         }
 
         Executor resolvedAsyncExecutor() {
-            return workerExecutor != null ? workerExecutor : AnvilIoPool.get();
+            return workerExecutor != null
+                    ? workerExecutor
+                    : ServerAccessors.blockingIoExecutor().orElse(Runnable::run);
         }
     }
 
@@ -357,8 +364,16 @@ public final class LeafAnvilWorldConverter {
                 try (DirectoryStream<Path> stream = Files.newDirectoryStream(folder)) {
                     for (Path file : stream) {
                         String name = file.getFileName().toString();
-                        if (LCA_REGION_FILE_PATTERN.matcher(name).matches()) {
+                        Matcher lcaMatch = LCA_REGION_FILE_PATTERN.matcher(name);
+                        if (lcaMatch.matches()) {
                             scanned.incrementAndGet();
+                            if (LcaRegionWriter.peekFormatVersion(file) == LcaRegionReader.LCA_FORMAT_VERSION_V2) {
+                                int rx = Integer.parseInt(lcaMatch.group(1));
+                                int rz = Integer.parseInt(lcaMatch.group(2));
+                                workItems.add(() -> upgradeLegacyV2RegionLca(
+                                        folder, file, rx, rz, lcd2Level, keepBackups,
+                                        liveStorage, converted, bytesBefore, bytesAfter));
+                            }
                             continue;
                         }
                         Matcher m = LEGACY_REGION_FILE_PATTERN.matcher(name);
@@ -454,6 +469,46 @@ public final class LeafAnvilWorldConverter {
             Files.deleteIfExists(file);
         }
         converted.incrementAndGet();
+    }
+
+    /**
+     * Off-thread atomic {@code 0x0002 -> 0x0003} upgrade for legacy `.lca` archives
+     * (`anvil-api-ADR-006`, `REQ-RTP-S-004`, `REQ-RTP-S-005`, `@scheduler_dispatch`).
+     */
+    private static void upgradeLegacyV2RegionLca(
+            Path folder,
+            Path lcaFile,
+            int rx,
+            int rz,
+            int lcd2Level,
+            boolean keepBackups,
+            LcaRegionFileStorage liveStorage,
+            AtomicInteger converted,
+            AtomicLong bytesBefore,
+            AtomicLong bytesAfter
+    ) throws IOException {
+        if (liveStorage != null) {
+            liveStorage.closeRegion(rx, rz);
+        }
+        if (!Files.exists(lcaFile)) {
+            return;
+        }
+        if (LcaRegionWriter.peekFormatVersion(lcaFile) != LcaRegionReader.LCA_FORMAT_VERSION_V2) {
+            return;
+        }
+        long before = Files.size(lcaFile);
+        bytesBefore.addAndGet(before);
+        if (keepBackups) {
+            Path bak = folder.resolve(lcaFile.getFileName().toString() + ".v2.bak");
+            Files.copy(lcaFile, bak, StandardCopyOption.REPLACE_EXISTING);
+        }
+        if (LcaRegionWriter.upgradeLegacyArchiveAtomically(lcaFile, lcd2Level)) {
+            if (liveStorage != null) {
+                liveStorage.invalidateRegionCacheState(rx, rz);
+            }
+            bytesAfter.addAndGet(Files.size(lcaFile));
+            converted.incrementAndGet();
+        }
     }
 
     /**
@@ -743,6 +798,15 @@ public final class LeafAnvilWorldConverter {
                     file.getFileName().toString() + "." + Thread.currentThread().getId() + ".heal.tmp");
             LcaRegionWriter.writeBytesAtomicallyDurable(file, tmp, lcaBytes);
             LcaRegionReader.invalidateFileCache(file);
+            if (liveStorage != null && matched) {
+                liveStorage.invalidateRegionCacheState(rx, rz);
+            }
+        }
+        if (LcaRegionWriter.peekFormatVersion(file) == LcaRegionReader.LCA_FORMAT_VERSION_V2
+                && LcaRegionWriter.upgradeLegacyArchiveAtomically(file, -1)) {
+            if (repairs == 0) {
+                modified.incrementAndGet();
+            }
             if (liveStorage != null && matched) {
                 liveStorage.invalidateRegionCacheState(rx, rz);
             }
@@ -1175,7 +1239,7 @@ public final class LeafAnvilWorldConverter {
     private static TaskHandle scheduleDelayedExecutorTimer(Runnable pulse, long periodMillis) {
         AtomicBoolean cancelled = new AtomicBoolean(false);
         Executor delayed = CompletableFuture.delayedExecutor(
-                Math.max(5L, periodMillis), TimeUnit.MILLISECONDS, AnvilIoPool.get());
+                Math.max(5L, periodMillis), TimeUnit.MILLISECONDS, Runnable::run);
         Runnable[] self = new Runnable[1];
         self[0] = () -> {
             if (cancelled.get()) {

@@ -19,10 +19,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ForkJoinPool;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Stream;
@@ -269,28 +265,7 @@ public final class WeightedParityEvaluator {
 
         public static TemplateConformityLibrary fromSources(Collection<Path> nbtSources) throws IOException {
             Collection<Path> safeSources = nbtSources == null ? List.of() : List.copyOf(nbtSources);
-            try {
-                return ForkJoinPool.commonPool()
-                        .submit(() -> loadFromSourcesOnWorker(safeSources))
-                        .get(5L, TimeUnit.MINUTES);
-            } catch (InterruptedException ex) {
-                Thread.currentThread().interrupt();
-                LOGGER.log(Level.WARNING, "Interrupted loading structure .nbt template conformity library", ex);
-                throw new IOException("Interrupted loading structure .nbt template conformity library", ex);
-            } catch (TimeoutException ex) {
-                LOGGER.log(Level.WARNING, "Timed out loading structure .nbt template conformity library", ex);
-                throw new IOException("Timed out loading structure .nbt template conformity library", ex);
-            } catch (ExecutionException ex) {
-                Throwable cause = ex.getCause();
-                LOGGER.log(Level.WARNING, "Failed loading structure .nbt template conformity library", cause);
-                if (cause instanceof IOException ioe) {
-                    throw ioe;
-                }
-                if (cause instanceof RuntimeException re) {
-                    throw re;
-                }
-                throw new IOException("Failed loading structure .nbt template conformity library", cause);
-            }
+            return loadFromSourcesOnWorker(safeSources);
         }
 
         static TemplateConformityLibrary loadFromSourcesOnWorker(Collection<Path> nbtSources) throws IOException {
@@ -505,8 +480,8 @@ public final class WeightedParityEvaluator {
             } catch (IOException | RuntimeException ex) {
                 LOGGER.log(
                         Level.WARNING,
-                        "Skipping unreadable structure .nbt template '" + rawTemplateId + "': " + ex.getMessage(),
-                        ex);
+                        ex,
+                        () -> "Skipping unreadable structure .nbt template '" + rawTemplateId + "': " + ex.getMessage());
                 return false;
             }
         }
@@ -741,7 +716,8 @@ public final class WeightedParityEvaluator {
                     // and candidate path tiles at chunk seams must connect cleanly without 1-block shear!
                     int refClimbableEdges = countClimbablePathEdges(refPathSurfaceByXz);
                     int candClimbableEdges = countClimbablePathEdges(candPathSurfaceByXz);
-                    int candCliffOrShearBreaks = countPathSeamShearsAndCliffs(refPathSurfaceByXz, candPathSurfaceByXz, candGrid);
+                    int candCliffOrShearBreaks = countPathSeamShearsAndCliffs(
+                            refPathSurfaceByXz, candPathSurfaceByXz, refGrid, candGrid);
 
                     if (candCliffOrShearBreaks > 0) {
                         pathDiscontinuityCount += candCliffOrShearBreaks;
@@ -760,14 +736,19 @@ public final class WeightedParityEvaluator {
                 }
             }
 
-            // Check village/structure doorway clearance & street reachability in candidate
+            // Check village/structure doorway clearance & street reachability in candidate (diffed against vanilla ref)
             List<BlockPos> candLowerDoors = candGrid.collectLowerDoorBlocks();
             List<BlockPos> refLowerDoors = refGrid.collectLowerDoorBlocks();
+            Set<BlockPos> refLowerDoorSet = new HashSet<>(refLowerDoors);
             for (BlockPos door : candLowerDoors) {
                 if (!candGrid.hasDoorwayEntryClearance(door)) {
-                    obstructedDoorwayCount++;
+                    boolean refAlsoObstructed = refLowerDoorSet.contains(door)
+                            && !refGrid.hasDoorwayEntryClearance(door);
+                    if (!refAlsoObstructed) {
+                        obstructedDoorwayCount++;
+                    }
                 } else if (!refPathSurfaceByXz.isEmpty()
-                        && hasAdjacentPath(refLowerDoors, refPathSurfaceByXz, door)
+                        && hasAdjacentPath(refLowerDoorSet, refPathSurfaceByXz, door)
                         && !hasNearbyPathColumn(candPathSurfaceByXz, door.x, door.z, door.y - 1, 2, 1)) {
                     pathDiscontinuityCount++;
                     recordTripwire(
@@ -810,11 +791,11 @@ public final class WeightedParityEvaluator {
                 boolean matchesRefIsomorphism = refExactSigs.contains(computeCanonicalSignature(ct.relVoxels, true))
                         || refNormSigs.contains(computeCanonicalSignature(ct.relVoxels, false));
 
-                if (ct.groundedOnSoil && ct.allLeavesConnected && (matchesLibrary || matchesRefIsomorphism)) {
-                    templateMatchedFeatureCount++;
-                    templateMatchedShiftedTreeVoxels += ct.relVoxels.size();
-                } else if (ct.groundedOnSoil && ct.hasTrunk && ct.hasCanopy && ct.allLeavesConnected
-                        && library.loadedTemplateCount() == 0 && refTrees.isEmpty()) {
+                boolean matchedTree = ct.groundedOnSoil && ct.allLeavesConnected
+                        && ((matchesLibrary || matchesRefIsomorphism)
+                                || (ct.hasTrunk && ct.hasCanopy
+                                        && library.loadedTemplateCount() == 0 && refTrees.isEmpty()));
+                if (matchedTree) {
                     templateMatchedFeatureCount++;
                     templateMatchedShiftedTreeVoxels += ct.relVoxels.size();
                 } else {
@@ -1439,7 +1420,7 @@ public final class WeightedParityEvaluator {
                     continue;
                 }
                 int baseY = run.relSectionY() << 4;
-                String role = isLogOrStemBlock(baseId) ? "TRUNK" : (isCanopyLeafBlock(baseId) ? "CANOPY" : baseId);
+                String role = classifyTreeVoxelRole(baseId);
                 for (int h = run.startH3(), end = run.startH3() + run.runLength(); h < end; h++) {
                     int yzx = LcaDecoratorStamp.h3ToYzx(h);
                     int lx = yzx & 15;
@@ -1468,7 +1449,7 @@ public final class WeightedParityEvaluator {
                     continue;
                 }
                 int baseY = run.relSectionY() << 4;
-                String role = isLogOrStemBlock(baseId) ? "TRUNK" : (isCanopyLeafBlock(baseId) ? "CANOPY" : baseId);
+                String role = classifyTreeVoxelRole(baseId);
                 for (int h = run.startH3(), end = run.startH3() + run.runLength(); h < end; h++) {
                     int yzx = LcaDecoratorStamp.h3ToYzx(h);
                     int lx = yzx & 15;
@@ -1479,6 +1460,13 @@ public final class WeightedParityEvaluator {
             }
         }
         return normalizeToBoundingOrigin(raw);
+    }
+
+    private static String classifyTreeVoxelRole(String baseId) {
+        if (isLogOrStemBlock(baseId)) {
+            return "TRUNK";
+        }
+        return isCanopyLeafBlock(baseId) ? "CANOPY" : baseId;
     }
 
     private static void registerEightSymmetries(
@@ -1628,15 +1616,14 @@ public final class WeightedParityEvaluator {
     }
 
     private static boolean hasAdjacentPath(
-            List<BlockPos> refDoors, Map<Long, Integer> refPathByXz, BlockPos candDoor) {
-        for (BlockPos rd : refDoors) {
-            if (Math.abs(rd.x - candDoor.x) <= 8 && Math.abs(rd.z - candDoor.z) <= 8) {
-                if (hasNearbyPathColumn(refPathByXz, rd.x, rd.z, rd.y - 1, 2, 1)) {
-                    return true;
-                }
-            }
+            Set<BlockPos> refDoorSet,
+            Map<Long, Integer> refPathByXz,
+            BlockPos candDoor) {
+        if (refDoorSet.contains(candDoor)) {
+            return hasNearbyPathColumn(refPathByXz, candDoor.x, candDoor.z, candDoor.y - 1, 2, 1);
         }
-        return false;
+        BlockPos nearest = findNearestWithinRadius(candDoor, refDoorSet, 2, 2);
+        return nearest != null && hasNearbyPathColumn(refPathByXz, nearest.x, nearest.z, nearest.y - 1, 2, 1);
     }
 
     private static int countClimbablePathEdges(Map<Long, Integer> pathByXz) {
@@ -1660,26 +1647,41 @@ public final class WeightedParityEvaluator {
     private static int countPathSeamShearsAndCliffs(
             Map<Long, Integer> refPathByXz,
             Map<Long, Integer> candPathByXz,
+            RegionStitchedView refGrid,
             RegionStitchedView candGrid) {
         int breaks = 0;
         int[][] cardinal = {{1, 0}, {0, 1}};
         for (Map.Entry<Long, Integer> e : candPathByXz.entrySet()) {
-            int x = unpackXzX(e.getKey());
-            int z = unpackXzZ(e.getKey());
+            long xz = e.getKey();
+            int x = unpackXzX(xz);
+            int z = unpackXzZ(xz);
             int y = e.getValue();
+            Integer refY = refPathByXz.get(xz);
 
-            // 1. Direct adjacent path cliff jump (|dY| > 1 prevents villager/player walking without jumping)
+            // 1. Direct adjacent path cliff jump (|dY| > 1) introduced by candidate (not already present in vanilla ref)
             for (int[] d : cardinal) {
-                Integer adjY = candPathByXz.get(packXz(x + d[0], z + d[1]));
+                long adjXz = packXz(x + d[0], z + d[1]);
+                Integer adjY = candPathByXz.get(adjXz);
                 if (adjY != null && Math.abs(adjY - y) > 1) {
-                    breaks++;
+                    Integer refAdjY = refPathByXz.get(adjXz);
+                    boolean refAlreadyHadCliff = refY != null && refAdjY != null && Math.abs(refAdjY - refY) > 1;
+                    if (!refAlreadyHadCliff) {
+                        breaks++;
+                    }
                 }
             }
 
-            // 2. Buried path tile (non-passable block directly above dirt_path)
+            // 2. Buried path tile (non-passable block directly above dirt_path) introduced by candidate
             String above = candGrid.blockAtWorld(x, y + 1, z);
             if (above != null && !isPassableHeadspace(above)) {
-                breaks++;
+                boolean refAlreadyBuried = false;
+                if (refY != null && refGrid != null) {
+                    String refAbove = refGrid.blockAtWorld(x, refY + 1, z);
+                    refAlreadyBuried = refAbove != null && !isPassableHeadspace(refAbove);
+                }
+                if (!refAlreadyBuried) {
+                    breaks++;
+                }
             }
         }
 

@@ -2,6 +2,7 @@ package io.github.dailystruggle.anvil;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.lang.ref.SoftReference;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -32,8 +33,17 @@ final class LcaV3Codec {
 
     // v3 SectionFrame extension flags (paletteLen == 0 escape)
     static final int SEC_EXT_RANK_EXCLUDED = 0x01;
+    static final int SEC_EXT_GRAY_BITPLANES = 0x02;
+    static final int SEC_EXT_VALID_MASK = SEC_EXT_RANK_EXCLUDED | SEC_EXT_GRAY_BITPLANES;
     static final int MIN_RANK_EXCL_PALETTE = 3;
     static final int MAX_RANK_EXCL_PALETTE = 12;
+    static final int MIN_GRAY_PALETTE = 3;
+    static final int MAX_GRAY_PALETTE = 64;
+
+    static boolean isValidSecExtFlags(int secExtFlags) {
+        return (secExtFlags & ~SEC_EXT_VALID_MASK) == 0
+                && (secExtFlags & SEC_EXT_VALID_MASK) != SEC_EXT_VALID_MASK;
+    }
 
     // v3 Eikonal light residual sentinel & sub-modes
     static final int SENTINEL_MODE_MASK = 0x03;
@@ -49,9 +59,15 @@ final class LcaV3Codec {
     static final int EXT_FLAG_COLUMNAR_BLOCK_TICKS = 0x01;
     static final int EXT_FLAG_COLUMNAR_FLUID_TICKS = 0x02;
     static final int EXT_FLAG_COLUMNAR_BLOCK_ENTITIES = 0x04;
-    static final int EXT_FLAG_RESERVED_MASK = ~0x07;
+    static final int EXT_FLAG_SPARSE_POST_PROCESSING = 0x08;
+    static final int EXT_FLAG_DICT_STRUCTURES = 0x10;
+    static final int EXT_FLAG_RESERVED_MASK = ~0x1F;
     static final int MAX_TICKS_PER_CHUNK = 65_536;
     static final int MAX_BLOCK_ENTITIES_PER_CHUNK = 16_384;
+    static final int MAX_PP_SECTIONS = 255;
+    static final int MAX_PP_SHORTS_PER_SECTION = 4096;
+    static final int MAX_STRUCT_LOCAL_STRINGS = 65_536;
+    static final int MAX_STRUCT_NBT_DEPTH = 64;
 
     // Feature mask for clean v3 profiling/testing:
     // Default enables Columnar Tail in Mode A & Mode B, plus Eikonal+B1 in Mode B (keeping Mode A ultra-fast for live saves).
@@ -60,15 +76,19 @@ final class LcaV3Codec {
     static final int FEATURE_COLUMNAR_TAIL = 1 << 1;
     static final int FEATURE_RANK_EXCL = 1 << 2;
     static final int FEATURE_EIKONAL_MODE_A = 1 << 3;
+    static final int FEATURE_GRAY_BITPLANES = 1 << 4;
     static final int DEFAULT_V3_FEATURES = FEATURE_EIKONAL_LIGHT | FEATURE_COLUMNAR_TAIL;
-    static final int ALL_V3_FEATURES =
-            FEATURE_EIKONAL_LIGHT | FEATURE_COLUMNAR_TAIL | FEATURE_RANK_EXCL | FEATURE_EIKONAL_MODE_A;
+    static final int ALL_V3_FEATURES = FEATURE_EIKONAL_LIGHT
+            | FEATURE_COLUMNAR_TAIL
+            | FEATURE_RANK_EXCL
+            | FEATURE_EIKONAL_MODE_A
+            | FEATURE_GRAY_BITPLANES;
 
     @SuppressWarnings("java:S5164")
     private static final ThreadLocal<Integer> THREAD_FEATURE_MASK = ThreadLocal.withInitial(() -> DEFAULT_V3_FEATURES);
 
     @SuppressWarnings("java:S5164")
-    private static final ThreadLocal<V3Scratch> V3_SCRATCH = ThreadLocal.withInitial(V3Scratch::new);
+    private static final ThreadLocal<SoftReference<V3Scratch>> V3_SCRATCH = new ThreadLocal<>();
 
     private static final byte[] MINECRAFT_PREFIX_BYTES = "minecraft:".getBytes(StandardCharsets.UTF_8);
 
@@ -87,7 +107,13 @@ final class LcaV3Codec {
     }
 
     static V3Scratch v3Scratch() {
-        return V3_SCRATCH.get();
+        SoftReference<V3Scratch> ref = V3_SCRATCH.get();
+        V3Scratch scratch = ref != null ? ref.get() : null;
+        if (scratch == null) {
+            scratch = new V3Scratch();
+            V3_SCRATCH.set(new SoftReference<>(scratch));
+        }
+        return scratch;
     }
 
     static void clearThreadLocalScratch() {
@@ -106,11 +132,44 @@ final class LcaV3Codec {
         final byte[] lightStagingAlt = new byte[4096];
         final long[] b1OctVoxMasks = new long[64];
         final byte[] b1NzNibbles = new byte[SECTION_VOXELS];
-        final int[] domainA = new int[SECTION_VOXELS];
-        final int[] domainB = new int[SECTION_VOXELS];
-        final byte[] claimed = new byte[SECTION_VOXELS];
-        final byte[] rankStaging = new byte[16384];
-        final int[] unpackedYzx = new int[SECTION_VOXELS];
+        int[] domainA;
+        int[] domainB;
+        byte[] claimed;
+        byte[] rankStaging;
+        int[] unpackedYzx;
+        int[] grayAdjMatrix;
+        int[] grayOldToNew;
+        int[] grayNewToOld;
+        boolean[] grayUsed;
+        int[] grayRemappedGlobalIds;
+        int[] grayCurveVals;
+        int[] grayRunStaging;
+        int[] grayRunStagingAlt;
+        byte[] grayStaging;
+
+        void ensureRankBuffers() {
+            if (domainA == null) {
+                domainA = new int[SECTION_VOXELS];
+                domainB = new int[SECTION_VOXELS];
+                claimed = new byte[SECTION_VOXELS];
+                rankStaging = new byte[16384];
+                unpackedYzx = new int[SECTION_VOXELS];
+            }
+        }
+
+        void ensureGrayBuffers() {
+            if (grayAdjMatrix == null) {
+                grayAdjMatrix = new int[MAX_GRAY_PALETTE * MAX_GRAY_PALETTE];
+                grayOldToNew = new int[MAX_GRAY_PALETTE];
+                grayNewToOld = new int[MAX_GRAY_PALETTE];
+                grayUsed = new boolean[MAX_GRAY_PALETTE];
+                grayRemappedGlobalIds = new int[MAX_GRAY_PALETTE];
+                grayCurveVals = new int[SECTION_VOXELS];
+                grayRunStaging = new int[SECTION_VOXELS];
+                grayRunStagingAlt = new int[SECTION_VOXELS];
+                grayStaging = new byte[16384];
+            }
+        }
     }
 
     // =========================================================================
@@ -781,8 +840,8 @@ final class LcaV3Codec {
     }
 
     /**
-     * Validates `boilerplateFlags16` bit `15` mutual exclusion against empty-list bits `0, 1, 2`
-     * and reserved `extFlags` bits `3..31` (`CBIT T5`).
+     * Validates `boilerplateFlags16` bit `15` mutual exclusion against empty-list/structure bits
+     * `0, 1, 2, 4, 5` and reserved `extFlags` bits `5..31` (`CBIT T5`).
      */
     static void validateExtFlags(int bpFlags, int extFlags, int formatVersion) throws CorruptRegionEntryException {
         if (formatVersion < LcaRegionReader.LCA_FORMAT_VERSION_V3) {
@@ -800,6 +859,12 @@ final class LcaV3Codec {
         if ((bpFlags & 1) != 0 && (extFlags & EXT_FLAG_COLUMNAR_BLOCK_ENTITIES) != 0) {
             throw new CorruptRegionEntryException("CBIT T5: Mutual exclusion violated for block_entities");
         }
+        if ((bpFlags & 32) != 0 && (extFlags & EXT_FLAG_SPARSE_POST_PROCESSING) != 0) {
+            throw new CorruptRegionEntryException("CBIT T5: Mutual exclusion violated for PostProcessing");
+        }
+        if ((bpFlags & 16) != 0 && (extFlags & EXT_FLAG_DICT_STRUCTURES) != 0) {
+            throw new CorruptRegionEntryException("CBIT T5: Mutual exclusion violated for structures");
+        }
     }
 
     /**
@@ -808,6 +873,7 @@ final class LcaV3Codec {
      * Returns encoded `ColumnarTickStream` bytes if every element matches the exact 6-key vanilla
      * schema `{i: String, p: Int, t: Int, x: Int, y: Int, z: Int}`, or `null` to fall back to Bit 10.
      */
+    @SuppressWarnings("java:S1168") // null signals non-columnarizable ticks so caller falls back to raw NBT
     static byte[] tryEncodeColumnarTicksFromNbtSlice(
             ByteBuffer src, int tagStart, int tagEnd, int chunkX, int chunkZ
     ) {
@@ -903,6 +969,7 @@ final class LcaV3Codec {
         return encodeColumnarTicksArrays(count, ids, xs, ys, zs, ts, ps, chunkX, chunkZ);
     }
 
+    @SuppressWarnings("java:S1168") // null signals non-columnarizable ticks so caller falls back to raw NBT
     static byte[] tryEncodeColumnarTicksFromList(Nbt.NbtList list, int chunkX, int chunkZ) {
         if ((currentFeatureMask() & FEATURE_COLUMNAR_TAIL) == 0
                 || list == null
@@ -948,7 +1015,7 @@ final class LcaV3Codec {
         return encodeColumnarTicksArrays(count, ids, xs, ys, zs, ts, ps, chunkX, chunkZ);
     }
 
-    private static byte[] encodeColumnarTicksArrays(
+    static byte[] encodeColumnarTicksArrays(
             int count, String[] ids, int[] xs, int[] ys, int[] zs, int[] ts, int[] ps, int chunkX, int chunkZ
     ) {
         int baseX = chunkX << 4;
@@ -1005,12 +1072,12 @@ final class LcaV3Codec {
         }
         long prevY = 0L;
         for (int k = 0; k < count; k++) {
-            writeZigZagVarLong(out, (long) ys[k] - prevY);
+            writeZigZagVarLong(out, ys[k] - prevY);
             prevY = ys[k];
         }
         long prevT = 0L;
         for (int k = 0; k < count; k++) {
-            writeZigZagVarLong(out, (long) ts[k] - prevT);
+            writeZigZagVarLong(out, ts[k] - prevT);
             prevT = ts[k];
         }
         if (!allPriorityZero) {
@@ -1114,6 +1181,94 @@ final class LcaV3Codec {
             items.add(m);
         }
         return new Nbt.NbtList(Nbt.TAG_COMPOUND, items);
+    }
+
+    static LcaDecodedChunkMeta.ColumnarTicks decodeColumnarTicksDirect(
+            byte[] buf,
+            int start,
+            int limit,
+            int chunkX,
+            int chunkZ
+    ) throws CorruptRegionEntryException {
+        int[] posRef = {start};
+        int count = readVarIntChecked(buf, posRef, limit);
+        if (count <= 0 || count > MAX_TICKS_PER_CHUNK || posRef[0] >= limit) {
+            throw new CorruptRegionEntryException("CBIT T4: Invalid columnar tickCount " + count);
+        }
+        int tickFlags = buf[posRef[0]++] & 0xFF;
+        if ((tickFlags & ~0x03) != 0) {
+            throw new CorruptRegionEntryException("CBIT T5: Reserved tickFlags bits set: " + tickFlags);
+        }
+        boolean allInChunkXZ = (tickFlags & 1) != 0;
+        boolean allPriorityZero = (tickFlags & 2) != 0;
+
+        int uniqueIdCount = readVarIntChecked(buf, posRef, limit);
+        if (uniqueIdCount <= 0 || uniqueIdCount > count) {
+            throw new CorruptRegionEntryException("CBIT T4: Invalid columnar uniqueIdCount " + uniqueIdCount);
+        }
+        String[] uniqueIds = new String[uniqueIdCount];
+        for (int i = 0; i < uniqueIdCount; i++) {
+            int hdr = readVarIntChecked(buf, posRef, limit);
+            boolean mcPrefix = (hdr & 1) != 0;
+            int uLen = hdr >>> 1;
+            if (uLen < 0 || posRef[0] + uLen > limit) {
+                throw new CorruptRegionEntryException("CBIT T5: Truncated columnar tick id string");
+            }
+            String suffix = new String(buf, posRef[0], uLen, StandardCharsets.UTF_8);
+            uniqueIds[i] = mcPrefix ? ("minecraft:" + suffix) : suffix;
+            posRef[0] += uLen;
+        }
+        int[] idOrds = new int[count];
+        if (uniqueIdCount > 1) {
+            for (int k = 0; k < count; k++) {
+                int ord = readVarIntChecked(buf, posRef, limit);
+                if (ord < 0 || ord >= uniqueIdCount) {
+                    throw new CorruptRegionEntryException("CBIT T7: Columnar tick idOrd out of bounds: " + ord);
+                }
+                idOrds[k] = ord;
+            }
+        }
+        int baseX = chunkX << 4;
+        int baseZ = chunkZ << 4;
+        int[] xs = new int[count];
+        int[] zs = new int[count];
+        if (allInChunkXZ) {
+            if (posRef[0] + count > limit) {
+                throw new CorruptRegionEntryException("CBIT T5: Truncated columnar tick packed XZ");
+            }
+            for (int k = 0; k < count; k++) {
+                int b = buf[posRef[0]++] & 0xFF;
+                xs[k] = baseX + (b >>> 4);
+                zs[k] = baseZ + (b & 0x0F);
+            }
+        } else {
+            for (int k = 0; k < count; k++) {
+                xs[k] = (int) (baseX + readZigZagVarLong(buf, posRef, limit));
+                zs[k] = (int) (baseZ + readZigZagVarLong(buf, posRef, limit));
+            }
+        }
+        int[] ys = new int[count];
+        long prevY = 0L;
+        for (int k = 0; k < count; k++) {
+            prevY += readZigZagVarLong(buf, posRef, limit);
+            ys[k] = (int) prevY;
+        }
+        int[] ts = new int[count];
+        long prevT = 0L;
+        for (int k = 0; k < count; k++) {
+            prevT += readZigZagVarLong(buf, posRef, limit);
+            ts[k] = (int) prevT;
+        }
+        int[] ps = new int[count];
+        if (!allPriorityZero) {
+            for (int k = 0; k < count; k++) {
+                ps[k] = (int) readZigZagVarLong(buf, posRef, limit);
+            }
+        }
+        if (posRef[0] != limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Columnar tick stream trailing bytes");
+        }
+        return new LcaDecodedChunkMeta.ColumnarTicks(uniqueIds, idOrds, xs, ys, zs, ts, ps);
     }
 
     static int decodeColumnarTicksToNbt(
@@ -1249,6 +1404,7 @@ final class LcaV3Codec {
      * Strips `x, y, z` (`coordType2 = 0`) or `Pos[3]` (`coordType2 = 1`) or leaves coordinates
      * verbatim inside the template (`coordType2 = 2`).
      */
+    @SuppressWarnings("java:S1168") // null signals non-columnarizable block entities so caller falls back to raw NBT
     static byte[] tryEncodeColumnarBlockEntitiesFromNbtSlice(
             ByteBuffer src, int tagStart, int tagEnd, int chunkX, int chunkZ
     ) {
@@ -1338,7 +1494,7 @@ final class LcaV3Codec {
                     if (p + 4 > tagEnd) return null;
                     int arrLen = src.getInt(p);
                     p += 4;
-                    if (arrLen < 0 || p + (long) arrLen * 4L > tagEnd) return null;
+                    if (arrLen < 0 || p + arrLen * 4L > tagEnd) return null;
                     if (arrLen == 3) {
                         posX = src.getInt(p);
                         posY = src.getInt(p + 4);
@@ -1377,6 +1533,7 @@ final class LcaV3Codec {
         return encodeColumnarBlockEntitiesArrays(count, coordTypes, xs, ys, zs, rawTemplates, chunkX, chunkZ);
     }
 
+    @SuppressWarnings("java:S1168") // null signals non-columnarizable block entities so caller falls back to raw NBT
     static byte[] tryEncodeColumnarBlockEntitiesFromList(Nbt.NbtList list, int chunkX, int chunkZ) {
         if ((currentFeatureMask() & FEATURE_COLUMNAR_TAIL) == 0
                 || list == null
@@ -1475,7 +1632,7 @@ final class LcaV3Codec {
                     writeVarInt(out, tmplOrds[k]);
                 }
                 out.write(((xs[k] - baseX) << 4) | (zs[k] - baseZ));
-                writeZigZagVarLong(out, (long) ys[k] - prevY);
+                writeZigZagVarLong(out, ys[k] - prevY);
                 prevY = ys[k];
             }
         } else {
@@ -1485,9 +1642,9 @@ final class LcaV3Codec {
             for (int k = 0; k < count; k++) {
                 writeVarInt(out, (tmplOrds[k] << 2) | coordTypes[k]);
                 if (coordTypes[k] != 2) {
-                    writeZigZagVarLong(out, (long) xs[k] - prevX);
-                    writeZigZagVarLong(out, (long) ys[k] - prevY);
-                    writeZigZagVarLong(out, (long) zs[k] - prevZ);
+                    writeZigZagVarLong(out, xs[k] - prevX);
+                    writeZigZagVarLong(out, ys[k] - prevY);
+                    writeZigZagVarLong(out, zs[k] - prevZ);
                     prevX = xs[k];
                     prevY = ys[k];
                     prevZ = zs[k];
@@ -1709,12 +1866,11 @@ final class LcaV3Codec {
             byte[] dst
     ) {
         V3Scratch sc = v3Scratch();
+        sc.ensureRankBuffers();
         int[] curDom = sc.domainA;
         int[] nextDom = sc.domainB;
         int rem = activeVoxels;
-        for (int i = 0; i < rem; i++) {
-            curDom[i] = curvePaletteIdx[i];
-        }
+        System.arraycopy(curvePaletteIdx, 0, curDom, 0, rem);
 
         int[] poolPacked = arena.runPoolPacked;
         int[] poolNext = arena.runPoolNext;
@@ -1790,6 +1946,7 @@ final class LcaV3Codec {
     ) throws CorruptRegionEntryException {
         int[] curveToLoc = LcaSectionCodec.CURVE_BITS_TO_PACKED_LOC[curveId][bits];
         V3Scratch sc = v3Scratch();
+        sc.ensureRankBuffers();
         int[] curDom = sc.domainA;
         int[] nextDom = sc.domainB;
         byte[] claimed = sc.claimed;
@@ -2034,6 +2191,459 @@ final class LcaV3Codec {
         return SECTION_VOXELS;
     }
 
+    // =========================================================================
+    // 5. Layer 4: Dominant-Pinned Adjacency-Ordered Local Gray Bitplanes (0x02)
+    // =========================================================================
+
+    /**
+     * Encodes active-domain voxels in {@code curvePaletteIdx[0..activeVoxels)} using a dominant-pinned,
+     * 3D curve-adjacency-ordered local palette and Reflected Binary Gray bitplanes
+     * ({@code SEC_EXT_GRAY_BITPLANES = 0x02}, {@code anvil-api-ADR-006}).
+     *
+     * <p>Writes {@code planeModes[ceil(b/4)] || planePayloads[0..b-1]} into {@code dst[0..len)} and
+     * writes the reordered local palette global/micro IDs into {@code outRemappedGlobalIds[0..paletteSize)}
+     * with {@code outRemappedGlobalIds[0] == sortedGlobalIds[0]} pinned.
+     */
+    static int tryEncodeAdjacencyGrayBitplanes(
+            int[] curvePaletteIdx,
+            int activeVoxels,
+            int paletteSize,
+            int[] sortedGlobalIds,
+            int[] outRemappedGlobalIds,
+            byte[] dst
+    ) {
+        if (activeVoxels <= 0 || paletteSize < 2 || paletteSize > MAX_GRAY_PALETTE) {
+            return -1;
+        }
+        V3Scratch sc = v3Scratch();
+        sc.ensureGrayBuffers();
+        int[] adj = sc.grayAdjMatrix;
+        int pSq = paletteSize * paletteSize;
+        Arrays.fill(adj, 0, pSq, 0);
+
+        int prev = curvePaletteIdx[0];
+        for (int i = 1; i < activeVoxels; i++) {
+            int cur = curvePaletteIdx[i];
+            if (cur != prev) {
+                adj[prev * paletteSize + cur]++;
+                adj[cur * paletteSize + prev]++;
+                prev = cur;
+            }
+        }
+
+        int[] oldToNew = sc.grayOldToNew;
+        int[] newToOld = sc.grayNewToOld;
+        boolean[] used = sc.grayUsed;
+        Arrays.fill(used, 0, paletteSize, false);
+        newToOld[0] = 0;
+        oldToNew[0] = 0;
+        used[0] = true;
+
+        int prevOld = 0;
+        for (int k = 1; k < paletteSize; k++) {
+            int rowBase = prevOld * paletteSize;
+            int bestCand = -1;
+            int bestWeight = -1;
+            for (int cand = 1; cand < paletteSize; cand++) {
+                if (used[cand]) continue;
+                int w = adj[rowBase + cand];
+                if (w > bestWeight) {
+                    bestWeight = w;
+                    bestCand = cand;
+                }
+            }
+            newToOld[k] = bestCand;
+            oldToNew[bestCand] = k;
+            used[bestCand] = true;
+            prevOld = bestCand;
+        }
+
+        for (int k = 0; k < paletteSize; k++) {
+            outRemappedGlobalIds[k] = sortedGlobalIds[newToOld[k]];
+        }
+
+        int[] grayCurve = sc.grayCurveVals;
+        for (int i = 0; i < activeVoxels; i++) {
+            int np = oldToNew[curvePaletteIdx[i]];
+            grayCurve[i] = np ^ (np >>> 1);
+        }
+
+        int b = 32 - Integer.numberOfLeadingZeros(paletteSize - 1);
+        int planeModeBytes = (b + 3) >>> 2;
+        Arrays.fill(dst, 0, planeModeBytes, (byte) 0);
+        int pos = planeModeBytes;
+        int rawPlaneBytes = (activeVoxels + 7) >>> 3;
+        int[] stagingA = sc.grayRunStaging;
+        int[] stagingB = sc.grayRunStagingAlt;
+
+        for (int plane = 0; plane < b; plane++) {
+            int mask = 1 << plane;
+            int prevMask = plane > 0 ? (1 << (plane - 1)) : 0;
+
+            int rawRunCount = 0;
+            int ones = 0;
+            int cursor = 0;
+            int i = 0;
+            while (i < activeVoxels) {
+                if ((grayCurve[i] & mask) == 0) {
+                    i++;
+                    continue;
+                }
+                int start = i++;
+                while (i < activeVoxels && (grayCurve[i] & mask) != 0) {
+                    i++;
+                }
+                int gap = start - cursor;
+                int len = i - start;
+                ones += len;
+                stagingA[rawRunCount++] = (gap << 16) | ((len - 1) & 0xFFFF);
+                cursor = i;
+            }
+
+            int mode;
+            if (ones == 0) {
+                mode = 0;
+            } else if (ones == activeVoxels) {
+                mode = 1;
+                dst[pos++] = (byte) 0xFF;
+            } else {
+                int bestKind = 3; // 0=singleRun, 1=rleA, 2=rleB, 3=rawBits
+                int bestBytes = rawPlaneBytes;
+                int bestRefCode = 0;
+                boolean bestSplit62 = false;
+                int bestRunCount = 0;
+
+                if (rawRunCount == 1) {
+                    int packed = stagingA[0];
+                    int start = packed >>> 16;
+                    int len = (packed & 0xFFFF) + 1;
+                    int singleLen = (start + len == activeVoxels || start == 0)
+                            ? 2
+                            : (2 + LcaSectionCodec.varIntLen(len - 1));
+                    if (singleLen <= bestBytes) {
+                        bestBytes = singleLen;
+                        bestKind = 0;
+                    }
+                } else {
+                    int size44 = measureGrayRleSize(stagingA, rawRunCount, false);
+                    int size62 = measureGrayRleSize(stagingA, rawRunCount, true);
+                    int minRaw = Math.min(size44, size62);
+                    if (minRaw <= bestBytes) {
+                        bestBytes = minRaw;
+                        bestKind = 1;
+                        bestRefCode = 0;
+                        bestSplit62 = size62 < size44;
+                        bestRunCount = rawRunCount;
+                    }
+                }
+
+                if (ones > (activeVoxels >>> 1)) {
+                    int invRuns = extractActiveGrayPlaneRuns(grayCurve, activeVoxels, mask, 0, mask, stagingB);
+                    int s44 = measureGrayRleSize(stagingB, invRuns, false);
+                    int s62 = measureGrayRleSize(stagingB, invRuns, true);
+                    int minInv = Math.min(s44, s62);
+                    if (minInv < bestBytes) {
+                        bestBytes = minInv;
+                        bestKind = 2;
+                        bestRefCode = 2;
+                        bestSplit62 = s62 < s44;
+                        bestRunCount = invRuns;
+                    }
+                }
+
+                if (plane > 0) {
+                    int[] xorTarget = (bestKind == 2) ? stagingA : stagingB;
+                    int xorRuns = extractActiveGrayPlaneRuns(grayCurve, activeVoxels, mask, prevMask, 0, xorTarget);
+                    int s44 = measureGrayRleSize(xorTarget, xorRuns, false);
+                    int s62 = measureGrayRleSize(xorTarget, xorRuns, true);
+                    int minXor = Math.min(s44, s62);
+                    if (minXor < bestBytes) {
+                        bestKind = (xorTarget == stagingA) ? 1 : 2;
+                        bestRefCode = 1;
+                        bestSplit62 = s62 < s44;
+                        bestRunCount = xorRuns;
+                    }
+                }
+
+                if (bestKind == 0) {
+                    mode = 1;
+                    int packed = stagingA[0];
+                    int start = packed >>> 16;
+                    int len = (packed & 0xFFFF) + 1;
+                    if (start + len == activeVoxels) {
+                        dst[pos++] = (byte) (0xE0 | ((start >>> 8) & 0x0F));
+                        dst[pos++] = (byte) (start & 0xFF);
+                    } else if (start == 0) {
+                        int end = len - 1;
+                        dst[pos++] = (byte) (0xD0 | ((end >>> 8) & 0x0F));
+                        dst[pos++] = (byte) (end & 0xFF);
+                    } else {
+                        dst[pos++] = (byte) (0xC0 | ((start >>> 8) & 0x0F));
+                        dst[pos++] = (byte) (start & 0xFF);
+                        pos = LcaSectionCodec.writeVarIntToBuf(dst, pos, len - 1);
+                    }
+                } else if (bestKind == 1 || bestKind == 2) {
+                    mode = 1;
+                    int[] srcRuns = (bestKind == 1) ? stagingA : stagingB;
+                    pos += LcaSectionCodec.emitGraySubModeCandidate(
+                            srcRuns, bestRunCount, bestRefCode, bestSplit62, dst, pos);
+                } else {
+                    mode = 3;
+                    Arrays.fill(dst, pos, pos + rawPlaneBytes, (byte) 0);
+                    for (int h = 0; h < activeVoxels; h++) {
+                        if ((grayCurve[h] & mask) != 0) {
+                            dst[pos + (h >>> 3)] |= (byte) (1 << (h & 7));
+                        }
+                    }
+                    pos += rawPlaneBytes;
+                }
+            }
+            dst[plane >>> 2] |= (byte) (mode << ((plane & 3) << 1));
+        }
+        return pos;
+    }
+
+    private static int measureGrayRleSize(int[] staging, int runCount, boolean split62) {
+        int size = 1 + (runCount >= 31 ? LcaSectionCodec.varIntLen(runCount - 31) : 0);
+        int gMax = split62 ? 63 : 15;
+        int lMax = split62 ? 3 : 15;
+        for (int r = 0; r < runCount; r++) {
+            int packed = staging[r];
+            int rawGap = packed >>> 16;
+            int adjGap = (r == 0) ? rawGap : (rawGap - 1);
+            int lm1 = packed & 0xFFFF;
+            size += 1 + (adjGap >= gMax ? LcaSectionCodec.varIntLen(adjGap - gMax) : 0)
+                    + (lm1 >= lMax ? LcaSectionCodec.varIntLen(lm1 - lMax) : 0);
+        }
+        return size;
+    }
+
+    private static int extractActiveGrayPlaneRuns(
+            int[] grayCurve, int activeVoxels, int mask, int refMask, int invertTarget, int[] staging
+    ) {
+        int runCount = 0;
+        int cursor = 0;
+        int i = 0;
+        while (i < activeVoxels) {
+            int bit = (grayCurve[i] & mask) ^ invertTarget;
+            int ref = (refMask != 0 && (grayCurve[i] & refMask) != 0) ? mask : 0;
+            if ((bit ^ ref) == 0) {
+                i++;
+                continue;
+            }
+            int start = i++;
+            while (i < activeVoxels) {
+                int b2 = (grayCurve[i] & mask) ^ invertTarget;
+                int r2 = (refMask != 0 && (grayCurve[i] & refMask) != 0) ? mask : 0;
+                if ((b2 ^ r2) == 0) break;
+                i++;
+            }
+            int gap = start - cursor;
+            int len = i - start;
+            staging[runCount++] = (gap << 16) | ((len - 1) & 0xFFFF);
+            cursor = i;
+        }
+        return runCount;
+    }
+
+    /**
+     * Decodes a {@code SEC_EXT_GRAY_BITPLANES} ({@code 0x02}) section directly into
+     * {@code packedBlockLongs}, enforcing strict bounds ({@code CBIT T5/T6}) and mandatory
+     * {@code CBIT T6b} ({@code decodedOctreeMask64 == expectedOctreeMask64}).
+     */
+    static int decodeGrayBitplaneBlocks(
+            byte[] buf,
+            int pos,
+            int limit,
+            int paletteLen,
+            int curveId,
+            long expectedOctreeMask64,
+            long[] packedBlockLongs,
+            int bits
+    ) throws CorruptRegionEntryException {
+        if (paletteLen < 2 || paletteLen > SECTION_VOXELS) {
+            throw new CorruptRegionEntryException("CBIT T7: Invalid Gray bitplane paletteLen " + paletteLen);
+        }
+        int payloadByteLen = LcaSectionCodec.readVarInt(buf, pos, limit);
+        pos += LcaSectionCodec.varIntLen(payloadByteLen);
+        int b = 32 - Integer.numberOfLeadingZeros(paletteLen - 1);
+        int planeModeBytes = (b + 3) >>> 2;
+        if (payloadByteLen < planeModeBytes || pos + payloadByteLen > limit) {
+            throw new CorruptRegionEntryException(
+                    "CBIT T5: Truncated Gray bitplane payload (len=" + payloadByteLen + ")");
+        }
+        int payloadEnd = pos + payloadByteLen;
+        int modesOff = pos;
+        pos += planeModeBytes;
+
+        int usedTailBits = (b & 3) << 1;
+        if (usedTailBits != 0) {
+            int lastModeByte = buf[modesOff + planeModeBytes - 1] & 0xFF;
+            if ((lastModeByte >>> usedTailBits) != 0) {
+                throw new CorruptRegionEntryException("CBIT T5: Reserved Gray planeMode bits set");
+            }
+        }
+
+        V3Scratch sc = v3Scratch();
+        sc.ensureRankBuffers();
+        sc.ensureGrayBuffers();
+        int[] curDom = sc.domainA;
+        int activeVoxels = buildInitialCurveDomain(curveId, expectedOctreeMask64, curDom);
+        int[] grayCurve = sc.grayCurveVals;
+        Arrays.fill(grayCurve, 0, activeVoxels, 0);
+        int rawPlaneBytes = (activeVoxels + 7) >>> 3;
+
+        for (int plane = 0; plane < b; plane++) {
+            int mode = ((buf[modesOff + (plane >>> 2)] & 0xFF) >>> ((plane & 3) << 1)) & 3;
+            int bit = 1 << plane;
+            int prevBit = plane > 0 ? (1 << (plane - 1)) : 0;
+            if (mode == 0) {
+                // Const0
+            } else if (mode == 2) {
+                throw new CorruptRegionEntryException("CBIT T5: Forbidden Gray voxel planeMode 2 on plane " + plane);
+            } else if (mode == 1) {
+                if (pos >= payloadEnd) {
+                    throw new CorruptRegionEntryException("CBIT T5: Truncated Gray voxel plane subHdr");
+                }
+                int subHdr = buf[pos++] & 0xFF;
+                if (subHdr == 0xFF) {
+                    for (int i = 0; i < activeVoxels; i++) {
+                        grayCurve[i] |= bit;
+                    }
+                } else if ((subHdr & 0xC0) == 0xC0) {
+                    int kind = (subHdr >>> 4) & 3;
+                    if (kind == 3 || pos >= payloadEnd) {
+                        throw new CorruptRegionEntryException("CBIT T5: Invalid or truncated Gray single-run subHdr");
+                    }
+                    int val12 = ((subHdr & 0x0F) << 8) | (buf[pos++] & 0xFF);
+                    int start;
+                    int end;
+                    if (kind == 2) {
+                        start = val12;
+                        end = activeVoxels;
+                    } else if (kind == 1) {
+                        start = 0;
+                        end = val12 + 1;
+                    } else {
+                        int lenM1 = LcaSectionCodec.readVarInt(buf, pos, payloadEnd);
+                        pos += LcaSectionCodec.varIntLen(lenM1);
+                        start = val12;
+                        end = start + lenM1 + 1;
+                    }
+                    if (start < 0 || end > activeVoxels || start > end) {
+                        throw new CorruptRegionEntryException("CBIT T6: Gray voxel single-run overflow");
+                    }
+                    for (int i = start; i < end; i++) {
+                        grayCurve[i] |= bit;
+                    }
+                } else {
+                    int refCode = (subHdr >>> 6) & 3;
+                    if (refCode == 1 && prevBit == 0) {
+                        throw new CorruptRegionEntryException("CBIT T5: Cross-plane XOR forbidden on Gray plane 0");
+                    }
+                    boolean split62 = (subHdr & 0x20) != 0;
+                    int runCount = subHdr & 0x1F;
+                    if (runCount == 31) {
+                        int extra = LcaSectionCodec.readVarInt(buf, pos, payloadEnd);
+                        pos += LcaSectionCodec.varIntLen(extra);
+                        runCount += extra;
+                    }
+                    if (runCount < 0 || runCount > activeVoxels) {
+                        throw new CorruptRegionEntryException("CBIT T5: Invalid Gray voxel runCount " + runCount);
+                    }
+                    if (refCode == 2) {
+                        for (int i = 0; i < activeVoxels; i++) {
+                            grayCurve[i] |= bit;
+                        }
+                    } else if (refCode == 1) {
+                        for (int i = 0; i < activeVoxels; i++) {
+                            if ((grayCurve[i] & prevBit) != 0) {
+                                grayCurve[i] |= bit;
+                            }
+                        }
+                    }
+                    int lBits = split62 ? 2 : 4;
+                    int gMax = split62 ? 63 : 15;
+                    int lMax = split62 ? 3 : 15;
+                    int cursor = 0;
+                    for (int r = 0; r < runCount; r++) {
+                        if (pos >= payloadEnd) {
+                            throw new CorruptRegionEntryException("CBIT T5: Truncated Gray voxel run");
+                        }
+                        int tok = buf[pos++] & 0xFF;
+                        int adjGap = (tok >>> lBits) & gMax;
+                        int lenMinusOne = tok & lMax;
+                        if (adjGap == gMax) {
+                            int extra = LcaSectionCodec.readVarInt(buf, pos, payloadEnd);
+                            pos += LcaSectionCodec.varIntLen(extra);
+                            adjGap += extra;
+                        }
+                        if (lenMinusOne == lMax) {
+                            int extra = LcaSectionCodec.readVarInt(buf, pos, payloadEnd);
+                            pos += LcaSectionCodec.varIntLen(extra);
+                            lenMinusOne += extra;
+                        }
+                        cursor += (r == 0) ? adjGap : (adjGap + 1);
+                        int runLen = lenMinusOne + 1;
+                        if (cursor < 0 || cursor + runLen > activeVoxels) {
+                            throw new CorruptRegionEntryException("CBIT T6: Gray voxel run cursor overflow");
+                        }
+                        for (int k = 0; k < runLen; k++) {
+                            grayCurve[cursor++] ^= bit;
+                        }
+                    }
+                }
+            } else {
+                if (pos + rawPlaneBytes > payloadEnd) {
+                    throw new CorruptRegionEntryException("CBIT T5: Truncated raw Gray voxel bitplane");
+                }
+                for (int bi = 0; bi < rawPlaneBytes; bi++) {
+                    int mask8 = buf[pos + bi] & 0xFF;
+                    if (mask8 == 0) continue;
+                    int base = bi << 3;
+                    int lim = Math.min(8, activeVoxels - base);
+                    for (int k = 0; k < lim; k++) {
+                        if ((mask8 & (1 << k)) != 0) {
+                            grayCurve[base + k] |= bit;
+                        }
+                    }
+                }
+                pos += rawPlaneBytes;
+            }
+        }
+
+        if (pos != payloadEnd) {
+            throw new CorruptRegionEntryException("CBIT T5: Gray bitplane payload trailing bytes");
+        }
+
+        int[] curveToLoc = LcaSectionCodec.CURVE_BITS_TO_PACKED_LOC[curveId][bits];
+        long decodedOctreeMask64 = 0L;
+        for (int i = 0; i < activeVoxels; i++) {
+            int g = grayCurve[i];
+            if (g != 0) {
+                int p = g ^ (g >>> 8);
+                p ^= (p >>> 4);
+                p ^= (p >>> 2);
+                p ^= (p >>> 1);
+                if (p >= paletteLen) {
+                    throw new CorruptRegionEntryException(
+                            "CBIT T6: Gray bitplane decoded ordinal " + p + " >= paletteLen " + paletteLen);
+                }
+                int loc = curveToLoc[curDom[i]];
+                packedBlockLongs[loc >>> 12] |= ((long) p) << loc;
+                decodedOctreeMask64 |= 1L << (loc >>> 6);
+            }
+        }
+
+        if (decodedOctreeMask64 != expectedOctreeMask64) {
+            throw new CorruptRegionEntryException(
+                    "CBIT T6b: GrayBitplane decodedOctreeMask64 mismatch (expected=0x"
+                            + Long.toHexString(expectedOctreeMask64)
+                            + ", decoded=0x" + Long.toHexString(decodedOctreeMask64) + ")");
+        }
+        return pos;
+    }
+
     /**
      * `anvil-api-ADR-005` Candidate `D`: Non-mutating `litLen[b]` bit-cost estimator for gating
      * `Mode B` (`LCD2`) section candidates without running double-`LCD2` trial encoding (`0 µs` decode cost).
@@ -2095,12 +2705,14 @@ final class LcaV3Codec {
     private static void copyExcluding1Range(
             ByteBuffer src, int start, int end, int exStart, int exEnd, ByteArrayOutputStream out
     ) {
-        for (int i = start; i < end; i++) {
+        int i = start;
+        while (i < end) {
             if (i >= exStart && i < exEnd) {
-                i = exEnd - 1;
+                i = exEnd;
                 continue;
             }
             out.write(src.get(i));
+            i++;
         }
     }
 
@@ -2116,20 +2728,22 @@ final class LcaV3Codec {
             int e2,
             ByteArrayOutputStream out
     ) {
-        for (int i = start; i < end; i++) {
+        int i = start;
+        while (i < end) {
             if (i >= s0 && i < e0) {
-                i = e0 - 1;
+                i = e0;
                 continue;
             }
             if (i >= s1 && i < e1) {
-                i = e1 - 1;
+                i = e1;
                 continue;
             }
             if (i >= s2 && i < e2) {
-                i = e2 - 1;
+                i = e2;
                 continue;
             }
             out.write(src.get(i));
+            i++;
         }
     }
 
@@ -2183,16 +2797,1736 @@ final class LcaV3Codec {
                 if (p + 4 > limit) return -1;
                 int len = src.getInt(p);
                 p += 4;
-                return (len >= 0 && p + (long) len * 4L <= limit) ? p + len * 4 : -1;
+                return (len >= 0 && p + len * 4L <= limit) ? p + len * 4 : -1;
             }
             case Nbt.TAG_LONG_ARRAY -> {
                 if (p + 4 > limit) return -1;
                 int len = src.getInt(p);
                 p += 4;
-                return (len >= 0 && p + (long) len * 8L <= limit) ? p + len * 8 : -1;
+                return (len >= 0 && p + len * 8L <= limit) ? p + len * 8 : -1;
             }
             default -> { return -1; }
         }
+    }
+
+    // =========================================================================
+    // Sparse PostProcessing (EXT_FLAG_SPARSE_POST_PROCESSING = 0x08)
+    // =========================================================================
+
+    static void writeZigZagVarInt(ByteArrayOutputStream out, int signedVal) {
+        int u = (signedVal << 1) ^ (signedVal >> 31);
+        while ((u & ~0x7F) != 0) {
+            out.write((u & 0x7F) | 0x80);
+            u >>>= 7;
+        }
+        out.write(u);
+    }
+
+    static int readZigZagVarInt(byte[] buf, int[] posRef, int limit) throws CorruptRegionEntryException {
+        int pos = posRef[0];
+        int result = 0;
+        int shift = 0;
+        while (pos < limit && shift < 35) {
+            int b = buf[pos++] & 0xFF;
+            result |= (b & 0x7F) << shift;
+            if ((b & 0x80) == 0) {
+                posRef[0] = pos;
+                return (result >>> 1) ^ -(result & 1);
+            }
+            shift += 7;
+        }
+        throw new CorruptRegionEntryException("CBIT T5: Truncated or malformed ZigZagVarInt");
+    }
+
+    static byte[] encodeSparsePostProcessing(short[][] sectionShorts) {
+        if (sectionShorts == null || sectionShorts.length == 0 || sectionShorts.length > MAX_PP_SECTIONS) {
+            return null;
+        }
+        int activeCount = 0;
+        int totalShorts = 0;
+        for (short[] arr : sectionShorts) {
+            if (arr != null && arr.length > 0) {
+                if (arr.length > MAX_PP_SHORTS_PER_SECTION) {
+                    return null;
+                }
+                activeCount++;
+                totalShorts += arr.length;
+            }
+        }
+        if (activeCount == 0) {
+            return null;
+        }
+        ByteArrayOutputStream out = new ByteArrayOutputStream(8 + activeCount * 3 + totalShorts * 2);
+        out.write(sectionShorts.length & 0xFF);
+        writeVarInt(out, activeCount);
+        for (int s = 0; s < sectionShorts.length; s++) {
+            short[] arr = sectionShorts[s];
+            if (arr == null || arr.length == 0) {
+                continue;
+            }
+            out.write(s & 0xFF);
+            writeVarInt(out, arr.length);
+            int prev = 0;
+            for (short v : arr) {
+                int cur = v & 0xFFFF;
+                writeZigZagVarInt(out, cur - prev);
+                prev = cur;
+            }
+        }
+        return out.toByteArray();
+    }
+
+    static byte[] tryEncodeSparsePostProcessingFromList(Nbt.NbtList ppList) {
+        if (ppList == null || ppList.elementType != Nbt.TAG_LIST) {
+            return null;
+        }
+        int sectionCount = ppList.items.size();
+        if (sectionCount == 0 || sectionCount > MAX_PP_SECTIONS) {
+            return null;
+        }
+        short[][] sections = new short[sectionCount][];
+        boolean anyNonEmpty = false;
+        for (int s = 0; s < sectionCount; s++) {
+            Object item = ppList.items.get(s);
+            if (!(item instanceof Nbt.NbtList sub)) {
+                return null;
+            }
+            int len = sub.items.size();
+            if (len == 0) {
+                continue;
+            }
+            if (sub.elementType != Nbt.TAG_SHORT || len > MAX_PP_SHORTS_PER_SECTION) {
+                return null;
+            }
+            short[] arr = new short[len];
+            for (int i = 0; i < len; i++) {
+                Object sv = sub.items.get(i);
+                if (!(sv instanceof Short sh)) {
+                    return null;
+                }
+                arr[i] = sh;
+            }
+            sections[s] = arr;
+            anyNonEmpty = true;
+        }
+        return anyNonEmpty ? encodeSparsePostProcessing(sections) : null;
+    }
+
+    static byte[] tryEncodeSparsePostProcessingFromNbtSlice(ByteBuffer src, int tagStart, int tagEnd) {
+        if (tagStart < 0 || tagEnd <= tagStart + 8 || src.get(tagStart) != Nbt.TAG_LIST) {
+            return null;
+        }
+        int nameLen = src.getShort(tagStart + 1) & 0xFFFF;
+        int pos = tagStart + 3 + nameLen;
+        if (pos + 5 > tagEnd) {
+            return null;
+        }
+        byte outerElem = src.get(pos++);
+        int sectionCount = src.getInt(pos);
+        pos += 4;
+        if (outerElem != Nbt.TAG_LIST || sectionCount <= 0 || sectionCount > MAX_PP_SECTIONS) {
+            return null;
+        }
+        short[][] sections = new short[sectionCount][];
+        boolean anyNonEmpty = false;
+        for (int s = 0; s < sectionCount; s++) {
+            if (pos + 5 > tagEnd) {
+                return null;
+            }
+            byte subElem = src.get(pos++);
+            int subLen = src.getInt(pos);
+            pos += 4;
+            if (subLen < 0 || subLen > MAX_PP_SHORTS_PER_SECTION) {
+                return null;
+            }
+            if (subLen == 0) {
+                continue;
+            }
+            if (subElem != Nbt.TAG_SHORT || pos + subLen * 2 > tagEnd) {
+                return null;
+            }
+            short[] arr = new short[subLen];
+            for (int i = 0; i < subLen; i++) {
+                arr[i] = src.getShort(pos);
+                pos += 2;
+            }
+            sections[s] = arr;
+            anyNonEmpty = true;
+        }
+        if (pos != tagEnd || !anyNonEmpty) {
+            return null;
+        }
+        return encodeSparsePostProcessing(sections);
+    }
+
+    static Nbt.NbtList decodeSparsePostProcessingToList(byte[] buf, int start, int limit)
+            throws CorruptRegionEntryException {
+        if (start >= limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Truncated sparse PostProcessing header");
+        }
+        int[] posRef = {start};
+        int sectionCount = buf[posRef[0]++] & 0xFF;
+        if (sectionCount == 0 || sectionCount > MAX_PP_SECTIONS) {
+            throw new CorruptRegionEntryException("CBIT T4: Invalid sparse PostProcessing sectionCount: " + sectionCount);
+        }
+        int activeCount = readVarIntChecked(buf, posRef, limit);
+        if (activeCount <= 0 || activeCount > sectionCount) {
+            throw new CorruptRegionEntryException("CBIT T4: Invalid sparse PostProcessing activeCount: " + activeCount);
+        }
+        List<Object> outer = new ArrayList<>(sectionCount);
+        for (int s = 0; s < sectionCount; s++) {
+            outer.add(new Nbt.NbtList(Nbt.TAG_SHORT, List.of()));
+        }
+        int prevSec = -1;
+        for (int a = 0; a < activeCount; a++) {
+            if (posRef[0] >= limit) {
+                throw new CorruptRegionEntryException("CBIT T5: Truncated sparse PostProcessing section entry");
+            }
+            int secIdx = buf[posRef[0]++] & 0xFF;
+            if (secIdx <= prevSec || secIdx >= sectionCount) {
+                throw new CorruptRegionEntryException("CBIT T5: Out-of-order or OOB sparse PostProcessing secIdx: " + secIdx);
+            }
+            prevSec = secIdx;
+            int cnt = readVarIntChecked(buf, posRef, limit);
+            if (cnt <= 0 || cnt > MAX_PP_SHORTS_PER_SECTION) {
+                throw new CorruptRegionEntryException("CBIT T4: Invalid sparse PostProcessing short count: " + cnt);
+            }
+            List<Object> shorts = new ArrayList<>(cnt);
+            int prev = 0;
+            for (int i = 0; i < cnt; i++) {
+                prev += readZigZagVarInt(buf, posRef, limit);
+                shorts.add((short) (prev & 0xFFFF));
+            }
+            outer.set(secIdx, new Nbt.NbtList(Nbt.TAG_SHORT, shorts));
+        }
+        if (posRef[0] != limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Trailing bytes in sparse PostProcessing payload");
+        }
+        return new Nbt.NbtList(Nbt.TAG_LIST, outer);
+    }
+
+    static short[][] decodeSparsePostProcessingDirect(
+            byte[] buf,
+            int start,
+            int limit
+    ) throws CorruptRegionEntryException {
+        if (start >= limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Truncated sparse PostProcessing header");
+        }
+        int[] posRef = {start};
+        int sectionCount = buf[posRef[0]++] & 0xFF;
+        if (sectionCount == 0 || sectionCount > MAX_PP_SECTIONS) {
+            throw new CorruptRegionEntryException("CBIT T4: Invalid sparse PostProcessing sectionCount: " + sectionCount);
+        }
+        int activeCount = readVarIntChecked(buf, posRef, limit);
+        if (activeCount <= 0 || activeCount > sectionCount) {
+            throw new CorruptRegionEntryException("CBIT T4: Invalid sparse PostProcessing activeCount: " + activeCount);
+        }
+        short[][] sections = new short[sectionCount][];
+        int prevSec = -1;
+        for (int a = 0; a < activeCount; a++) {
+            if (posRef[0] >= limit) {
+                throw new CorruptRegionEntryException("CBIT T5: Truncated sparse PostProcessing section entry");
+            }
+            int secIdx = buf[posRef[0]++] & 0xFF;
+            if (secIdx <= prevSec || secIdx >= sectionCount) {
+                throw new CorruptRegionEntryException("CBIT T5: Out-of-order or OOB sparse PostProcessing secIdx: " + secIdx);
+            }
+            prevSec = secIdx;
+            int cnt = readVarIntChecked(buf, posRef, limit);
+            if (cnt <= 0 || cnt > MAX_PP_SHORTS_PER_SECTION) {
+                throw new CorruptRegionEntryException("CBIT T4: Invalid sparse PostProcessing short count: " + cnt);
+            }
+            short[] arr = new short[cnt];
+            int prev = 0;
+            for (int i = 0; i < cnt; i++) {
+                prev += readZigZagVarInt(buf, posRef, limit);
+                arr[i] = (short) (prev & 0xFFFF);
+            }
+            sections[secIdx] = arr;
+        }
+        if (posRef[0] != limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Trailing bytes in sparse PostProcessing payload");
+        }
+        return sections;
+    }
+
+    static int decodeSparsePostProcessingToNbt(
+            byte[] buf,
+            int start,
+            int limit,
+            LcaSectionCodec.ScratchArena arena,
+            int outPos
+    ) throws CorruptRegionEntryException {
+        if (start >= limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Truncated sparse PostProcessing header");
+        }
+        int[] posRef = {start};
+        int sectionCount = buf[posRef[0]++] & 0xFF;
+        if (sectionCount == 0 || sectionCount > MAX_PP_SECTIONS) {
+            throw new CorruptRegionEntryException("CBIT T4: Invalid sparse PostProcessing sectionCount: " + sectionCount);
+        }
+        int activeCount = readVarIntChecked(buf, posRef, limit);
+        if (activeCount <= 0 || activeCount > sectionCount) {
+            throw new CorruptRegionEntryException("CBIT T4: Invalid sparse PostProcessing activeCount: " + activeCount);
+        }
+        short[][] sections = new short[sectionCount][];
+        int totalShorts = 0;
+        int prevSec = -1;
+        for (int a = 0; a < activeCount; a++) {
+            if (posRef[0] >= limit) {
+                throw new CorruptRegionEntryException("CBIT T5: Truncated sparse PostProcessing section entry");
+            }
+            int secIdx = buf[posRef[0]++] & 0xFF;
+            if (secIdx <= prevSec || secIdx >= sectionCount) {
+                throw new CorruptRegionEntryException("CBIT T5: Out-of-order or OOB sparse PostProcessing secIdx: " + secIdx);
+            }
+            prevSec = secIdx;
+            int cnt = readVarIntChecked(buf, posRef, limit);
+            if (cnt <= 0 || cnt > MAX_PP_SHORTS_PER_SECTION) {
+                throw new CorruptRegionEntryException("CBIT T4: Invalid sparse PostProcessing short count: " + cnt);
+            }
+            short[] arr = new short[cnt];
+            int prev = 0;
+            for (int i = 0; i < cnt; i++) {
+                prev += readZigZagVarInt(buf, posRef, limit);
+                arr[i] = (short) (prev & 0xFFFF);
+            }
+            sections[secIdx] = arr;
+            totalShorts += cnt;
+        }
+        if (posRef[0] != limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Trailing bytes in sparse PostProcessing payload");
+        }
+
+        // Write TAG_List("PostProcessing") of TAG_List of TAG_Short
+        byte[] nameUtf = "PostProcessing".getBytes(StandardCharsets.UTF_8);
+        int needed = 3 + nameUtf.length + 5 + sectionCount * 5 + totalShorts * 2 + 16;
+        byte[] out = arena.ensureNbtCap(outPos + needed);
+        out[outPos++] = Nbt.TAG_LIST;
+        out[outPos++] = (byte) ((nameUtf.length >>> 8) & 0xFF);
+        out[outPos++] = (byte) (nameUtf.length & 0xFF);
+        System.arraycopy(nameUtf, 0, out, outPos, nameUtf.length);
+        outPos += nameUtf.length;
+        out[outPos++] = Nbt.TAG_LIST;
+        LcaSectionCodec.writeIntBEToBuf(out, outPos, sectionCount);
+        outPos += 4;
+        for (int s = 0; s < sectionCount; s++) {
+            short[] arr = sections[s];
+            out[outPos++] = Nbt.TAG_SHORT;
+            if (arr == null) {
+                out[outPos++] = 0;
+                out[outPos++] = 0;
+                out[outPos++] = 0;
+                out[outPos++] = 0;
+            } else {
+                LcaSectionCodec.writeIntBEToBuf(out, outPos, arr.length);
+                outPos += 4;
+                for (short v : arr) {
+                    out[outPos++] = (byte) ((v >>> 8) & 0xFF);
+                    out[outPos++] = (byte) (v & 0xFF);
+                }
+            }
+        }
+        return outPos;
+    }
+
+    // =========================================================================
+    // Dictionary-Encoded Structures (EXT_FLAG_DICT_STRUCTURES = 0x10)
+    // =========================================================================
+
+    private static final String[] STATIC_STRUCT_STRINGS = {
+        "starts", "references", "Starts", "References", "id", "Children", "BB", "O", "GD",
+        "ChunkX", "ChunkZ", "PosX", "PosY", "PosZ", "Entrances", "MST", "hps", "hr", "sc",
+        "Num", "pool_element", "element_type", "location", "processors", "projection",
+        "override_liquid_settings", "ground_level_delta", "rotation", "junctions",
+        "source_x", "source_y", "source_z", "delta_y", "dest_proj", "source_ground_y",
+        "minecraft:jigsaw", "minecraft:single_pool_element", "minecraft:empty_pool_element",
+        "minecraft:feature_pool_element", "minecraft:list_pool_element",
+        "minecraft:legacy_single_pool_element", "rigid", "terrain_matching", "minecraft:empty",
+        "minecraft:mineshaft", "minecraft:mineshaft_mesa", "minecraft:mineshaft_corridor",
+        "minecraft:mineshaft_crossing", "minecraft:mineshaft_stairs", "minecraft:mineshaft_room",
+        "minecraft:ruined_portal", "minecraft:ruined_portal_desert", "minecraft:ruined_portal_jungle",
+        "minecraft:ruined_portal_mountain", "minecraft:ruined_portal_nether",
+        "minecraft:ruined_portal_ocean", "minecraft:ruined_portal_swamp",
+        "minecraft:stronghold", "minecraft:trial_chambers", "minecraft:ancient_city",
+        "minecraft:village_plains", "minecraft:village_desert", "minecraft:village_savanna",
+        "minecraft:village_snowy", "minecraft:village_taiga",
+        "minecraft:shipwreck", "minecraft:shipwreck_beached", "minecraft:ocean_ruin_cold",
+        "minecraft:ocean_ruin_warm", "minecraft:buried_treasure", "minecraft:igloo",
+        "minecraft:desert_pyramid", "minecraft:jungle_pyramid", "minecraft:swamp_hut",
+        "minecraft:monument", "minecraft:mansion", "minecraft:pillager_outpost",
+        "minecraft:trail_ruins", "minecraft:nether_fossil", "minecraft:fortress",
+        "minecraft:bastion_remnant", "minecraft:end_city",
+        "INVALID", "Processed", "Valid", "tf", "Type", "C", "D", "H", "L", "W", "X", "Y", "Z",
+        "NONE", "CLOCKWISE_90", "CLOCKWISE_180", "COUNTERCLOCKWISE_90",
+        "ignore_waterlogging", "apply_waterlogging", "Template", "Rot", "Integrity", "BiomeType",
+        "Large", "Mossiness", "AirPocket", "Overgrown", "Vines", "ReplaceWithBlackstone", "Cold"
+    };
+
+    private static final Map<String, Integer> STATIC_STRUCT_STRING_IDS;
+    private static final byte[][] STATIC_STRUCT_STRING_UTF8;
+
+    static {
+        Map<String, Integer> m = new HashMap<>(STATIC_STRUCT_STRINGS.length * 2);
+        byte[][] utf = new byte[STATIC_STRUCT_STRINGS.length][];
+        for (int i = 0; i < STATIC_STRUCT_STRINGS.length; i++) {
+            m.put(STATIC_STRUCT_STRINGS[i], i);
+            utf[i] = STATIC_STRUCT_STRINGS[i].getBytes(StandardCharsets.UTF_8);
+        }
+        STATIC_STRUCT_STRING_IDS = m;
+        STATIC_STRUCT_STRING_UTF8 = utf;
+    }
+
+    private static int internStructString(String s, Map<String, Integer> localMap, List<String> localList) {
+        Integer staticId = STATIC_STRUCT_STRING_IDS.get(s);
+        if (staticId != null) {
+            return staticId;
+        }
+        Integer localId = localMap.get(s);
+        if (localId != null) {
+            return localId;
+        }
+        int id = STATIC_STRUCT_STRINGS.length + localList.size();
+        localMap.put(s, id);
+        localList.add(s);
+        return id;
+    }
+
+    static byte[] tryEncodeDictStructuresFromRootNbtBytes(byte[] rootNbt, int chunkX, int chunkZ) {
+        if (rootNbt == null || rootNbt.length < 4 || rootNbt[0] != Nbt.TAG_COMPOUND) {
+            return null;
+        }
+        int nameLen = ((rootNbt[1] & 0xFF) << 8) | (rootNbt[2] & 0xFF);
+        int bodyStart = 3 + nameLen;
+        if (bodyStart >= rootNbt.length) {
+            return null;
+        }
+        return encodeDictStructuresFromCompoundBody(
+                ByteBuffer.wrap(rootNbt), bodyStart, rootNbt.length, chunkX, chunkZ, rootNbt.length);
+    }
+
+    static byte[] tryEncodeDictStructuresFromNbtSlice(
+            ByteBuffer src, int tagStart, int tagEnd, int chunkX, int chunkZ) {
+        if (tagStart < 0 || tagEnd <= tagStart + 4 || src.get(tagStart) != Nbt.TAG_COMPOUND) {
+            return null;
+        }
+        int nameLen = src.getShort(tagStart + 1) & 0xFFFF;
+        int bodyStart = tagStart + 3 + nameLen;
+        if (bodyStart >= tagEnd) {
+            return null;
+        }
+        return encodeDictStructuresFromCompoundBody(src, bodyStart, tagEnd, chunkX, chunkZ, tagEnd - tagStart);
+    }
+
+    private static byte[] encodeDictStructuresFromCompoundBody(
+            ByteBuffer src, int bodyStart, int limit, int chunkX, int chunkZ, int rawLen) {
+        Map<String, Integer> localMap = new HashMap<>(32);
+        List<String> localList = new ArrayList<>(32);
+        ByteArrayOutputStream bodyOut = new ByteArrayOutputStream(Math.max(64, rawLen >>> 2));
+        int[] posRef = {bodyStart};
+        if (!encodeDictNbtCompoundBodyFromBuf(src, posRef, limit, chunkX, chunkZ, localMap, localList, bodyOut, 0)) {
+            return null;
+        }
+        if (posRef[0] != limit || localList.size() > MAX_STRUCT_LOCAL_STRINGS) {
+            return null;
+        }
+        return finalizeDictStructuresPayload(localList, bodyOut.toByteArray());
+    }
+
+    private static boolean encodeDictNbtCompoundBodyFromBuf(
+            ByteBuffer src,
+            int[] posRef,
+            int limit,
+            int chunkX,
+            int chunkZ,
+            Map<String, Integer> localMap,
+            List<String> localList,
+            ByteArrayOutputStream out,
+            int depth
+    ) {
+        if (depth > MAX_STRUCT_NBT_DEPTH) {
+            return false;
+        }
+        while (posRef[0] < limit) {
+            int tagType = src.get(posRef[0]++) & 0xFF;
+            out.write(tagType);
+            if (tagType == Nbt.TAG_END) {
+                return true;
+            }
+            if (posRef[0] + 2 > limit) {
+                return false;
+            }
+            int kLen = src.getShort(posRef[0]) & 0xFFFF;
+            posRef[0] += 2;
+            if (posRef[0] + kLen > limit) {
+                return false;
+            }
+            byte[] kBytes = new byte[kLen];
+            src.duplicate().position(posRef[0]).get(kBytes);
+            posRef[0] += kLen;
+            String key = new String(kBytes, StandardCharsets.UTF_8);
+            int keyId = internStructString(key, localMap, localList);
+            if (localList.size() > MAX_STRUCT_LOCAL_STRINGS) {
+                return false;
+            }
+            writeVarInt(out, keyId);
+            if (!encodeDictNbtPayloadFromBuf(src, posRef, limit, tagType, chunkX, chunkZ, localMap, localList, out, depth)) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private static boolean encodeDictNbtPayloadFromBuf(
+            ByteBuffer src,
+            int[] posRef,
+            int limit,
+            int tagType,
+            int chunkX,
+            int chunkZ,
+            Map<String, Integer> localMap,
+            List<String> localList,
+            ByteArrayOutputStream out,
+            int depth
+    ) {
+        int p = posRef[0];
+        switch (tagType) {
+            case Nbt.TAG_BYTE -> {
+                if (p + 1 > limit) return false;
+                out.write(src.get(p) & 0xFF);
+                posRef[0] = p + 1;
+                return true;
+            }
+            case Nbt.TAG_SHORT -> {
+                if (p + 2 > limit) return false;
+                writeZigZagVarInt(out, src.getShort(p));
+                posRef[0] = p + 2;
+                return true;
+            }
+            case Nbt.TAG_INT -> {
+                if (p + 4 > limit) return false;
+                writeZigZagVarInt(out, src.getInt(p));
+                posRef[0] = p + 4;
+                return true;
+            }
+            case Nbt.TAG_LONG -> {
+                if (p + 8 > limit) return false;
+                writeZigZagVarLong(out, src.getLong(p));
+                posRef[0] = p + 8;
+                return true;
+            }
+            case Nbt.TAG_FLOAT -> {
+                if (p + 4 > limit) return false;
+                int bits = src.getInt(p);
+                out.write((bits >>> 24) & 0xFF);
+                out.write((bits >>> 16) & 0xFF);
+                out.write((bits >>> 8) & 0xFF);
+                out.write(bits & 0xFF);
+                posRef[0] = p + 4;
+                return true;
+            }
+            case Nbt.TAG_DOUBLE -> {
+                if (p + 8 > limit) return false;
+                long bits = src.getLong(p);
+                for (int sh = 56; sh >= 0; sh -= 8) {
+                    out.write((int) ((bits >>> sh) & 0xFFL));
+                }
+                posRef[0] = p + 8;
+                return true;
+            }
+            case Nbt.TAG_BYTE_ARRAY -> {
+                if (p + 4 > limit) return false;
+                int len = src.getInt(p);
+                p += 4;
+                if (len < 0 || p + len > limit) return false;
+                writeVarInt(out, len);
+                for (int i = 0; i < len; i++) {
+                    out.write(src.get(p + i) & 0xFF);
+                }
+                posRef[0] = p + len;
+                return true;
+            }
+            case Nbt.TAG_STRING -> {
+                if (p + 2 > limit) return false;
+                int len = src.getShort(p) & 0xFFFF;
+                p += 2;
+                if (p + len > limit) return false;
+                byte[] sBytes = new byte[len];
+                src.duplicate().position(p).get(sBytes);
+                posRef[0] = p + len;
+                String sVal = new String(sBytes, StandardCharsets.UTF_8);
+                int strId = internStructString(sVal, localMap, localList);
+                if (localList.size() > MAX_STRUCT_LOCAL_STRINGS) return false;
+                writeVarInt(out, strId);
+                return true;
+            }
+            case Nbt.TAG_LIST -> {
+                if (depth >= MAX_STRUCT_NBT_DEPTH || p + 5 > limit) return false;
+                int elemType = src.get(p++) & 0xFF;
+                int cnt = src.getInt(p);
+                p += 4;
+                if (cnt < 0 || cnt > Nbt.MAX_ARRAY_LENGTH) return false;
+                posRef[0] = p;
+                out.write(elemType);
+                writeVarInt(out, cnt);
+                for (int i = 0; i < cnt; i++) {
+                    if (!encodeDictNbtPayloadFromBuf(src, posRef, limit, elemType, chunkX, chunkZ, localMap, localList, out, depth + 1)) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            case Nbt.TAG_COMPOUND -> {
+                return encodeDictNbtCompoundBodyFromBuf(src, posRef, limit, chunkX, chunkZ, localMap, localList, out, depth + 1);
+            }
+            case Nbt.TAG_INT_ARRAY -> {
+                if (p + 4 > limit) return false;
+                int len = src.getInt(p);
+                p += 4;
+                if (len < 0 || p + len * 4L > limit) return false;
+                writeVarInt(out, len);
+                if (len == 6) {
+                    int minX = src.getInt(p);
+                    int minY = src.getInt(p + 4);
+                    int minZ = src.getInt(p + 8);
+                    int maxX = src.getInt(p + 12);
+                    int maxY = src.getInt(p + 16);
+                    int maxZ = src.getInt(p + 20);
+                    writeZigZagVarInt(out, minX - (chunkX << 4));
+                    writeZigZagVarInt(out, minY);
+                    writeZigZagVarInt(out, minZ - (chunkZ << 4));
+                    writeZigZagVarInt(out, maxX - minX);
+                    writeZigZagVarInt(out, maxY - minY);
+                    writeZigZagVarInt(out, maxZ - minZ);
+                } else {
+                    for (int i = 0; i < len; i++) {
+                        writeZigZagVarInt(out, src.getInt(p + i * 4));
+                    }
+                }
+                posRef[0] = p + len * 4;
+                return true;
+            }
+            case Nbt.TAG_LONG_ARRAY -> {
+                if (p + 4 > limit) return false;
+                int len = src.getInt(p);
+                p += 4;
+                if (len < 0 || p + len * 8L > limit) return false;
+                writeVarInt(out, len);
+                for (int i = 0; i < len; i++) {
+                    writeZigZagVarLong(out, src.getLong(p + i * 8));
+                }
+                posRef[0] = p + len * 8;
+                return true;
+            }
+            default -> { return false; }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    static byte[] tryEncodeDictStructuresFromMap(Map<String, Object> map, int chunkX, int chunkZ) {
+        if (map == null || map.isEmpty()) {
+            return null;
+        }
+        Map<String, Integer> localMap = new HashMap<>(32);
+        List<String> localList = new ArrayList<>(32);
+        ByteArrayOutputStream bodyOut = new ByteArrayOutputStream(128);
+        if (!encodeDictNbtCompoundFromMap(map, chunkX, chunkZ, localMap, localList, bodyOut, 0)) {
+            return null;
+        }
+        if (localList.size() > MAX_STRUCT_LOCAL_STRINGS) {
+            return null;
+        }
+        return finalizeDictStructuresPayload(localList, bodyOut.toByteArray());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static boolean encodeDictNbtCompoundFromMap(
+            Map<String, Object> map,
+            int chunkX,
+            int chunkZ,
+            Map<String, Integer> localMap,
+            List<String> localList,
+            ByteArrayOutputStream out,
+            int depth
+    ) {
+        if (depth > MAX_STRUCT_NBT_DEPTH) {
+            return false;
+        }
+        for (Map.Entry<String, Object> e : map.entrySet()) {
+            Object val = e.getValue();
+            int tagType = nbtTagTypeOf(val);
+            if (tagType <= 0) {
+                return false;
+            }
+            out.write(tagType);
+            int keyId = internStructString(e.getKey(), localMap, localList);
+            if (localList.size() > MAX_STRUCT_LOCAL_STRINGS) {
+                return false;
+            }
+            writeVarInt(out, keyId);
+            if (!encodeDictNbtValueFromObj(val, tagType, chunkX, chunkZ, localMap, localList, out, depth)) {
+                return false;
+            }
+        }
+        out.write(Nbt.TAG_END);
+        return true;
+    }
+
+    private static int nbtTagTypeOf(Object val) {
+        if (val instanceof Byte) return Nbt.TAG_BYTE;
+        if (val instanceof Short) return Nbt.TAG_SHORT;
+        if (val instanceof Integer) return Nbt.TAG_INT;
+        if (val instanceof Long) return Nbt.TAG_LONG;
+        if (val instanceof Float) return Nbt.TAG_FLOAT;
+        if (val instanceof Double) return Nbt.TAG_DOUBLE;
+        if (val instanceof byte[]) return Nbt.TAG_BYTE_ARRAY;
+        if (val instanceof String) return Nbt.TAG_STRING;
+        if (val instanceof Nbt.NbtList) return Nbt.TAG_LIST;
+        if (val instanceof Map<?, ?>) return Nbt.TAG_COMPOUND;
+        if (val instanceof int[]) return Nbt.TAG_INT_ARRAY;
+        if (val instanceof long[]) return Nbt.TAG_LONG_ARRAY;
+        return -1;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static boolean encodeDictNbtValueFromObj(
+            Object val,
+            int tagType,
+            int chunkX,
+            int chunkZ,
+            Map<String, Integer> localMap,
+            List<String> localList,
+            ByteArrayOutputStream out,
+            int depth
+    ) {
+        switch (tagType) {
+            case Nbt.TAG_BYTE -> {
+                out.write(((Byte) val) & 0xFF);
+                return true;
+            }
+            case Nbt.TAG_SHORT -> {
+                writeZigZagVarInt(out, (Short) val);
+                return true;
+            }
+            case Nbt.TAG_INT -> {
+                writeZigZagVarInt(out, (Integer) val);
+                return true;
+            }
+            case Nbt.TAG_LONG -> {
+                writeZigZagVarLong(out, (Long) val);
+                return true;
+            }
+            case Nbt.TAG_FLOAT -> {
+                int bits = Float.floatToRawIntBits((Float) val);
+                out.write((bits >>> 24) & 0xFF);
+                out.write((bits >>> 16) & 0xFF);
+                out.write((bits >>> 8) & 0xFF);
+                out.write(bits & 0xFF);
+                return true;
+            }
+            case Nbt.TAG_DOUBLE -> {
+                long bits = Double.doubleToRawLongBits((Double) val);
+                for (int sh = 56; sh >= 0; sh -= 8) {
+                    out.write((int) ((bits >>> sh) & 0xFFL));
+                }
+                return true;
+            }
+            case Nbt.TAG_BYTE_ARRAY -> {
+                byte[] arr = (byte[]) val;
+                writeVarInt(out, arr.length);
+                out.writeBytes(arr);
+                return true;
+            }
+            case Nbt.TAG_STRING -> {
+                int strId = internStructString((String) val, localMap, localList);
+                if (localList.size() > MAX_STRUCT_LOCAL_STRINGS) return false;
+                writeVarInt(out, strId);
+                return true;
+            }
+            case Nbt.TAG_LIST -> {
+                if (depth >= MAX_STRUCT_NBT_DEPTH) return false;
+                Nbt.NbtList nl = (Nbt.NbtList) val;
+                out.write(nl.elementType & 0xFF);
+                writeVarInt(out, nl.items.size());
+                for (Object item : nl.items) {
+                    if (!encodeDictNbtValueFromObj(item, nl.elementType, chunkX, chunkZ, localMap, localList, out, depth + 1)) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            case Nbt.TAG_COMPOUND -> {
+                return encodeDictNbtCompoundFromMap((Map<String, Object>) val, chunkX, chunkZ, localMap, localList, out, depth + 1);
+            }
+            case Nbt.TAG_INT_ARRAY -> {
+                int[] arr = (int[]) val;
+                writeVarInt(out, arr.length);
+                if (arr.length == 6) {
+                    writeZigZagVarInt(out, arr[0] - (chunkX << 4));
+                    writeZigZagVarInt(out, arr[1]);
+                    writeZigZagVarInt(out, arr[2] - (chunkZ << 4));
+                    writeZigZagVarInt(out, arr[3] - arr[0]);
+                    writeZigZagVarInt(out, arr[4] - arr[1]);
+                    writeZigZagVarInt(out, arr[5] - arr[2]);
+                } else {
+                    for (int v : arr) {
+                        writeZigZagVarInt(out, v);
+                    }
+                }
+                return true;
+            }
+            case Nbt.TAG_LONG_ARRAY -> {
+                long[] arr = (long[]) val;
+                writeVarInt(out, arr.length);
+                for (long v : arr) {
+                    writeZigZagVarLong(out, v);
+                }
+                return true;
+            }
+            default -> { return false; }
+        }
+    }
+
+    private static byte[] finalizeDictStructuresPayload(List<String> localList, byte[] body) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream(16 + localList.size() * 16 + body.length);
+        writeVarInt(out, localList.size());
+        for (String s : localList) {
+            byte[] utf = s.getBytes(StandardCharsets.UTF_8);
+            writeVarInt(out, utf.length);
+            out.writeBytes(utf);
+        }
+        out.writeBytes(body);
+        return out.toByteArray();
+    }
+
+    private static String resolveDictStructString(int id, String[] localStrings) throws CorruptRegionEntryException {
+        if (id >= 0 && id < STATIC_STRUCT_STRINGS.length) {
+            return STATIC_STRUCT_STRINGS[id];
+        }
+        int localIdx = id - STATIC_STRUCT_STRINGS.length;
+        if (localIdx < 0 || localIdx >= localStrings.length) {
+            throw new CorruptRegionEntryException("CBIT T7: Dictionary structure string ID out of bounds: " + id);
+        }
+        return localStrings[localIdx];
+    }
+
+    private static byte[] resolveDictStructUtf8(int id, byte[][] localUtf8) throws CorruptRegionEntryException {
+        if (id >= 0 && id < STATIC_STRUCT_STRING_UTF8.length) {
+            return STATIC_STRUCT_STRING_UTF8[id];
+        }
+        int localIdx = id - STATIC_STRUCT_STRING_UTF8.length;
+        if (localIdx < 0 || localIdx >= localUtf8.length) {
+            throw new CorruptRegionEntryException("CBIT T7: Dictionary structure string ID out of bounds: " + id);
+        }
+        return localUtf8[localIdx];
+    }
+
+    static LinkedHashMap<String, Object> decodeDictStructuresToMap(
+            byte[] buf, int start, int limit, int chunkX, int chunkZ) throws CorruptRegionEntryException {
+        int[] posRef = {start};
+        int localCount = readVarIntChecked(buf, posRef, limit);
+        if (localCount < 0 || localCount > MAX_STRUCT_LOCAL_STRINGS) {
+            throw new CorruptRegionEntryException("CBIT T4: Invalid dict structures localCount: " + localCount);
+        }
+        String[] localStrings = new String[localCount];
+        for (int i = 0; i < localCount; i++) {
+            int uLen = readVarIntChecked(buf, posRef, limit);
+            if (uLen < 0 || posRef[0] + uLen > limit) {
+                throw new CorruptRegionEntryException("CBIT T5: Truncated dict structures local string");
+            }
+            localStrings[i] = new String(buf, posRef[0], uLen, StandardCharsets.UTF_8);
+            posRef[0] += uLen;
+        }
+        LinkedHashMap<String, Object> root = decodeDictNbtCompoundToMap(buf, posRef, limit, chunkX, chunkZ, localStrings, 0);
+        if (posRef[0] != limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Trailing bytes in dict structures payload");
+        }
+        return root;
+    }
+
+    private static LinkedHashMap<String, Object> decodeDictNbtCompoundToMap(
+            byte[] buf, int[] posRef, int limit, int chunkX, int chunkZ, String[] localStrings, int depth
+    ) throws CorruptRegionEntryException {
+        if (depth > MAX_STRUCT_NBT_DEPTH) {
+            throw new CorruptRegionEntryException("CBIT T5: Dict structures NBT depth exceeded");
+        }
+        LinkedHashMap<String, Object> map = new LinkedHashMap<>();
+        while (posRef[0] < limit) {
+            int tagType = buf[posRef[0]++] & 0xFF;
+            if (tagType == Nbt.TAG_END) {
+                return map;
+            }
+            int keyId = readVarIntChecked(buf, posRef, limit);
+            String key = resolveDictStructString(keyId, localStrings);
+            Object val = decodeDictNbtValueToObj(buf, posRef, limit, tagType, chunkX, chunkZ, localStrings, depth);
+            map.put(key, val);
+        }
+        throw new CorruptRegionEntryException("CBIT T5: Unterminated dict structures TAG_Compound");
+    }
+
+    private static Object decodeDictNbtValueToObj(
+            byte[] buf, int[] posRef, int limit, int tagType, int chunkX, int chunkZ, String[] localStrings, int depth
+    ) throws CorruptRegionEntryException {
+        switch (tagType) {
+            case Nbt.TAG_BYTE -> {
+                if (posRef[0] >= limit) throw new CorruptRegionEntryException("CBIT T5: Truncated dict TAG_Byte");
+                return buf[posRef[0]++];
+            }
+            case Nbt.TAG_SHORT -> {
+                return (short) readZigZagVarInt(buf, posRef, limit);
+            }
+            case Nbt.TAG_INT -> {
+                return readZigZagVarInt(buf, posRef, limit);
+            }
+            case Nbt.TAG_LONG -> {
+                return readZigZagVarLong(buf, posRef, limit);
+            }
+            case Nbt.TAG_FLOAT -> {
+                if (posRef[0] + 4 > limit) throw new CorruptRegionEntryException("CBIT T5: Truncated dict TAG_Float");
+                int bits = LcaSectionCodec.readIntBE(buf, posRef[0]);
+                posRef[0] += 4;
+                return Float.intBitsToFloat(bits);
+            }
+            case Nbt.TAG_DOUBLE -> {
+                if (posRef[0] + 8 > limit) throw new CorruptRegionEntryException("CBIT T5: Truncated dict TAG_Double");
+                long bits = (long) LcaRegionReader.LONG_BE_VIEW.get(buf, posRef[0]);
+                posRef[0] += 8;
+                return Double.longBitsToDouble(bits);
+            }
+            case Nbt.TAG_BYTE_ARRAY -> {
+                int len = readVarIntChecked(buf, posRef, limit);
+                if (len < 0 || posRef[0] + len > limit) {
+                    throw new CorruptRegionEntryException("CBIT T5: Truncated dict TAG_Byte_Array");
+                }
+                byte[] arr = Arrays.copyOfRange(buf, posRef[0], posRef[0] + len);
+                posRef[0] += len;
+                return arr;
+            }
+            case Nbt.TAG_STRING -> {
+                int strId = readVarIntChecked(buf, posRef, limit);
+                return resolveDictStructString(strId, localStrings);
+            }
+            case Nbt.TAG_LIST -> {
+                if (depth >= MAX_STRUCT_NBT_DEPTH || posRef[0] >= limit) {
+                    throw new CorruptRegionEntryException("CBIT T5: Truncated or deep dict TAG_List");
+                }
+                byte elemType = buf[posRef[0]++];
+                int cnt = readVarIntChecked(buf, posRef, limit);
+                if (cnt < 0 || cnt > Nbt.MAX_ARRAY_LENGTH) {
+                    throw new CorruptRegionEntryException("CBIT T4: Invalid dict TAG_List count: " + cnt);
+                }
+                List<Object> items = new ArrayList<>(Math.min(cnt, 64));
+                for (int i = 0; i < cnt; i++) {
+                    items.add(decodeDictNbtValueToObj(buf, posRef, limit, elemType & 0xFF, chunkX, chunkZ, localStrings, depth + 1));
+                }
+                return new Nbt.NbtList(elemType, items);
+            }
+            case Nbt.TAG_COMPOUND -> {
+                return decodeDictNbtCompoundToMap(buf, posRef, limit, chunkX, chunkZ, localStrings, depth + 1);
+            }
+            case Nbt.TAG_INT_ARRAY -> {
+                int len = readVarIntChecked(buf, posRef, limit);
+                if (len < 0 || len > Nbt.MAX_ARRAY_LENGTH) {
+                    throw new CorruptRegionEntryException("CBIT T4: Invalid dict TAG_Int_Array len: " + len);
+                }
+                int[] arr = new int[len];
+                if (len == 6) {
+                    int minX = readZigZagVarInt(buf, posRef, limit) + (chunkX << 4);
+                    int minY = readZigZagVarInt(buf, posRef, limit);
+                    int minZ = readZigZagVarInt(buf, posRef, limit) + (chunkZ << 4);
+                    arr[0] = minX;
+                    arr[1] = minY;
+                    arr[2] = minZ;
+                    arr[3] = minX + readZigZagVarInt(buf, posRef, limit);
+                    arr[4] = minY + readZigZagVarInt(buf, posRef, limit);
+                    arr[5] = minZ + readZigZagVarInt(buf, posRef, limit);
+                } else {
+                    for (int i = 0; i < len; i++) {
+                        arr[i] = readZigZagVarInt(buf, posRef, limit);
+                    }
+                }
+                return arr;
+            }
+            case Nbt.TAG_LONG_ARRAY -> {
+                int len = readVarIntChecked(buf, posRef, limit);
+                if (len < 0 || len > Nbt.MAX_ARRAY_LENGTH) {
+                    throw new CorruptRegionEntryException("CBIT T4: Invalid dict TAG_Long_Array len: " + len);
+                }
+                long[] arr = new long[len];
+                for (int i = 0; i < len; i++) {
+                    arr[i] = readZigZagVarLong(buf, posRef, limit);
+                }
+                return arr;
+            }
+            default -> throw new CorruptRegionEntryException("CBIT T5: Unknown dict NBT tagType: " + tagType);
+        }
+    }
+
+    static int decodeDictStructuresToNbt(
+            byte[] buf,
+            int start,
+            int limit,
+            int chunkX,
+            int chunkZ,
+            LcaSectionCodec.ScratchArena arena,
+            int outPos
+    ) throws CorruptRegionEntryException {
+        int[] posRef = {start};
+        int localCount = readVarIntChecked(buf, posRef, limit);
+        if (localCount < 0 || localCount > MAX_STRUCT_LOCAL_STRINGS) {
+            throw new CorruptRegionEntryException("CBIT T4: Invalid dict structures localCount: " + localCount);
+        }
+        byte[][] localUtf8 = new byte[localCount][];
+        for (int i = 0; i < localCount; i++) {
+            int uLen = readVarIntChecked(buf, posRef, limit);
+            if (uLen < 0 || posRef[0] + uLen > limit) {
+                throw new CorruptRegionEntryException("CBIT T5: Truncated dict structures local string");
+            }
+            localUtf8[i] = Arrays.copyOfRange(buf, posRef[0], posRef[0] + uLen);
+            posRef[0] += uLen;
+        }
+
+        byte[] nameUtf = "structures".getBytes(StandardCharsets.UTF_8);
+        byte[] out = arena.ensureNbtCap(outPos + 3 + nameUtf.length + 64);
+        out[outPos++] = Nbt.TAG_COMPOUND;
+        out[outPos++] = (byte) ((nameUtf.length >>> 8) & 0xFF);
+        out[outPos++] = (byte) (nameUtf.length & 0xFF);
+        System.arraycopy(nameUtf, 0, out, outPos, nameUtf.length);
+        outPos += nameUtf.length;
+
+        outPos = decodeDictNbtCompoundToNbt(buf, posRef, limit, chunkX, chunkZ, localUtf8, arena, outPos, 0);
+        if (posRef[0] != limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Trailing bytes in dict structures payload");
+        }
+        return outPos;
+    }
+
+    private static int decodeDictNbtCompoundToNbt(
+            byte[] buf,
+            int[] posRef,
+            int limit,
+            int chunkX,
+            int chunkZ,
+            byte[][] localUtf8,
+            LcaSectionCodec.ScratchArena arena,
+            int outPos,
+            int depth
+    ) throws CorruptRegionEntryException {
+        if (depth > MAX_STRUCT_NBT_DEPTH) {
+            throw new CorruptRegionEntryException("CBIT T5: Dict structures NBT depth exceeded");
+        }
+        while (posRef[0] < limit) {
+            int tagType = buf[posRef[0]++] & 0xFF;
+            if (tagType == Nbt.TAG_END) {
+                byte[] out = arena.ensureNbtCap(outPos + 1);
+                out[outPos++] = Nbt.TAG_END;
+                return outPos;
+            }
+            int keyId = readVarIntChecked(buf, posRef, limit);
+            byte[] kUtf = resolveDictStructUtf8(keyId, localUtf8);
+            byte[] out = arena.ensureNbtCap(outPos + 3 + kUtf.length + 16);
+            out[outPos++] = (byte) tagType;
+            out[outPos++] = (byte) ((kUtf.length >>> 8) & 0xFF);
+            out[outPos++] = (byte) (kUtf.length & 0xFF);
+            System.arraycopy(kUtf, 0, out, outPos, kUtf.length);
+            outPos += kUtf.length;
+            outPos = decodeDictNbtPayloadToNbt(buf, posRef, limit, tagType, chunkX, chunkZ, localUtf8, arena, outPos, depth);
+        }
+        throw new CorruptRegionEntryException("CBIT T5: Unterminated dict structures TAG_Compound");
+    }
+
+    private static int decodeDictNbtPayloadToNbt(
+            byte[] buf,
+            int[] posRef,
+            int limit,
+            int tagType,
+            int chunkX,
+            int chunkZ,
+            byte[][] localUtf8,
+            LcaSectionCodec.ScratchArena arena,
+            int outPos,
+            int depth
+    ) throws CorruptRegionEntryException {
+        switch (tagType) {
+            case Nbt.TAG_BYTE -> {
+                if (posRef[0] >= limit) throw new CorruptRegionEntryException("CBIT T5: Truncated dict TAG_Byte");
+                byte[] out = arena.ensureNbtCap(outPos + 1);
+                out[outPos++] = buf[posRef[0]++];
+                return outPos;
+            }
+            case Nbt.TAG_SHORT -> {
+                short v = (short) readZigZagVarInt(buf, posRef, limit);
+                byte[] out = arena.ensureNbtCap(outPos + 2);
+                out[outPos++] = (byte) ((v >>> 8) & 0xFF);
+                out[outPos++] = (byte) (v & 0xFF);
+                return outPos;
+            }
+            case Nbt.TAG_INT -> {
+                int v = readZigZagVarInt(buf, posRef, limit);
+                byte[] out = arena.ensureNbtCap(outPos + 4);
+                LcaSectionCodec.writeIntBEToBuf(out, outPos, v);
+                return outPos + 4;
+            }
+            case Nbt.TAG_LONG -> {
+                long v = readZigZagVarLong(buf, posRef, limit);
+                byte[] out = arena.ensureNbtCap(outPos + 8);
+                LcaSectionCodec.writeLongBEToBuf(out, outPos, v);
+                return outPos + 8;
+            }
+            case Nbt.TAG_FLOAT -> {
+                if (posRef[0] + 4 > limit) throw new CorruptRegionEntryException("CBIT T5: Truncated dict TAG_Float");
+                byte[] out = arena.ensureNbtCap(outPos + 4);
+                System.arraycopy(buf, posRef[0], out, outPos, 4);
+                posRef[0] += 4;
+                return outPos + 4;
+            }
+            case Nbt.TAG_DOUBLE -> {
+                if (posRef[0] + 8 > limit) throw new CorruptRegionEntryException("CBIT T5: Truncated dict TAG_Double");
+                byte[] out = arena.ensureNbtCap(outPos + 8);
+                System.arraycopy(buf, posRef[0], out, outPos, 8);
+                posRef[0] += 8;
+                return outPos + 8;
+            }
+            case Nbt.TAG_BYTE_ARRAY -> {
+                int len = readVarIntChecked(buf, posRef, limit);
+                if (len < 0 || posRef[0] + len > limit) {
+                    throw new CorruptRegionEntryException("CBIT T5: Truncated dict TAG_Byte_Array");
+                }
+                byte[] out = arena.ensureNbtCap(outPos + 4 + len);
+                LcaSectionCodec.writeIntBEToBuf(out, outPos, len);
+                outPos += 4;
+                System.arraycopy(buf, posRef[0], out, outPos, len);
+                posRef[0] += len;
+                return outPos + len;
+            }
+            case Nbt.TAG_STRING -> {
+                int strId = readVarIntChecked(buf, posRef, limit);
+                byte[] sUtf = resolveDictStructUtf8(strId, localUtf8);
+                byte[] out = arena.ensureNbtCap(outPos + 2 + sUtf.length);
+                out[outPos++] = (byte) ((sUtf.length >>> 8) & 0xFF);
+                out[outPos++] = (byte) (sUtf.length & 0xFF);
+                System.arraycopy(sUtf, 0, out, outPos, sUtf.length);
+                return outPos + sUtf.length;
+            }
+            case Nbt.TAG_LIST -> {
+                if (depth >= MAX_STRUCT_NBT_DEPTH || posRef[0] >= limit) {
+                    throw new CorruptRegionEntryException("CBIT T5: Truncated or deep dict TAG_List");
+                }
+                byte elemType = buf[posRef[0]++];
+                int cnt = readVarIntChecked(buf, posRef, limit);
+                if (cnt < 0 || cnt > Nbt.MAX_ARRAY_LENGTH) {
+                    throw new CorruptRegionEntryException("CBIT T4: Invalid dict TAG_List count: " + cnt);
+                }
+                byte[] out = arena.ensureNbtCap(outPos + 5);
+                out[outPos++] = elemType;
+                LcaSectionCodec.writeIntBEToBuf(out, outPos, cnt);
+                outPos += 4;
+                for (int i = 0; i < cnt; i++) {
+                    outPos = decodeDictNbtPayloadToNbt(buf, posRef, limit, elemType & 0xFF, chunkX, chunkZ, localUtf8, arena, outPos, depth + 1);
+                }
+                return outPos;
+            }
+            case Nbt.TAG_COMPOUND -> {
+                return decodeDictNbtCompoundToNbt(buf, posRef, limit, chunkX, chunkZ, localUtf8, arena, outPos, depth + 1);
+            }
+            case Nbt.TAG_INT_ARRAY -> {
+                int len = readVarIntChecked(buf, posRef, limit);
+                if (len < 0 || len > Nbt.MAX_ARRAY_LENGTH) {
+                    throw new CorruptRegionEntryException("CBIT T4: Invalid dict TAG_Int_Array len: " + len);
+                }
+                byte[] out = arena.ensureNbtCap(outPos + 4 + len * 4);
+                LcaSectionCodec.writeIntBEToBuf(out, outPos, len);
+                outPos += 4;
+                if (len == 6) {
+                    int minX = readZigZagVarInt(buf, posRef, limit) + (chunkX << 4);
+                    int minY = readZigZagVarInt(buf, posRef, limit);
+                    int minZ = readZigZagVarInt(buf, posRef, limit) + (chunkZ << 4);
+                    int maxX = minX + readZigZagVarInt(buf, posRef, limit);
+                    int maxY = minY + readZigZagVarInt(buf, posRef, limit);
+                    int maxZ = minZ + readZigZagVarInt(buf, posRef, limit);
+                    LcaSectionCodec.writeIntBEToBuf(out, outPos, minX);
+                    LcaSectionCodec.writeIntBEToBuf(out, outPos + 4, minY);
+                    LcaSectionCodec.writeIntBEToBuf(out, outPos + 8, minZ);
+                    LcaSectionCodec.writeIntBEToBuf(out, outPos + 12, maxX);
+                    LcaSectionCodec.writeIntBEToBuf(out, outPos + 16, maxY);
+                    LcaSectionCodec.writeIntBEToBuf(out, outPos + 20, maxZ);
+                    return outPos + 24;
+                }
+                for (int i = 0; i < len; i++) {
+                    LcaSectionCodec.writeIntBEToBuf(out, outPos, readZigZagVarInt(buf, posRef, limit));
+                    outPos += 4;
+                }
+                return outPos;
+            }
+            case Nbt.TAG_LONG_ARRAY -> {
+                int len = readVarIntChecked(buf, posRef, limit);
+                if (len < 0 || len > Nbt.MAX_ARRAY_LENGTH) {
+                    throw new CorruptRegionEntryException("CBIT T4: Invalid dict TAG_Long_Array len: " + len);
+                }
+                byte[] out = arena.ensureNbtCap(outPos + 4 + len * 8);
+                LcaSectionCodec.writeIntBEToBuf(out, outPos, len);
+                outPos += 4;
+                for (int i = 0; i < len; i++) {
+                    LcaSectionCodec.writeLongBEToBuf(out, outPos, readZigZagVarLong(buf, posRef, limit));
+                    outPos += 8;
+                }
+                return outPos;
+            }
+            default -> throw new CorruptRegionEntryException("CBIT T5: Unknown dict NBT tagType: " + tagType);
+        }
+    }
+
+    /**
+     * Decodes a v3 {@code EXT_FLAG_DICT_STRUCTURES} payload directly into a caller-supplied
+     * compound object via {@link LcaDecodedChunkMeta.DirectNbtBuilder} with zero intermediate NBT
+     * byte synthesis ({@code anvil-api-ADR-007}).
+     */
+    static <C, L> C decodeDictStructuresDirect(
+            byte[] buf,
+            int start,
+            int limit,
+            int chunkX,
+            int chunkZ,
+            LcaDecodedChunkMeta.DirectNbtBuilder<C, L> builder
+    ) throws CorruptRegionEntryException {
+        int[] posRef = {start};
+        int localCount = readVarIntChecked(buf, posRef, limit);
+        if (localCount < 0 || localCount > MAX_STRUCT_LOCAL_STRINGS) {
+            throw new CorruptRegionEntryException("CBIT T4: Invalid dict structures localCount: " + localCount);
+        }
+        String[] localStrings = new String[localCount];
+        for (int i = 0; i < localCount; i++) {
+            int uLen = readVarIntChecked(buf, posRef, limit);
+            if (uLen < 0 || posRef[0] + uLen > limit) {
+                throw new CorruptRegionEntryException("CBIT T5: Truncated dict structures local string");
+            }
+            localStrings[i] = new String(buf, posRef[0], uLen, StandardCharsets.UTF_8);
+            posRef[0] += uLen;
+        }
+        C root = decodeDictNbtCompoundDirect(buf, posRef, limit, chunkX, chunkZ, localStrings, builder, 0);
+        if (posRef[0] != limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Trailing bytes in dict structures payload");
+        }
+        return root;
+    }
+
+    private static <C, L> C decodeDictNbtCompoundDirect(
+            byte[] buf,
+            int[] posRef,
+            int limit,
+            int chunkX,
+            int chunkZ,
+            String[] localStrings,
+            LcaDecodedChunkMeta.DirectNbtBuilder<C, L> builder,
+            int depth
+    ) throws CorruptRegionEntryException {
+        if (depth > MAX_STRUCT_NBT_DEPTH) {
+            throw new CorruptRegionEntryException("CBIT T5: Dict structures NBT depth exceeded");
+        }
+        C compound = builder.newCompound();
+        while (posRef[0] < limit) {
+            int tagType = buf[posRef[0]++] & 0xFF;
+            if (tagType == Nbt.TAG_END) {
+                return compound;
+            }
+            int keyId = readVarIntChecked(buf, posRef, limit);
+            String key = resolveDictStructString(keyId, localStrings);
+            decodeDictNbtPutField(buf, posRef, limit, tagType, key, chunkX, chunkZ, localStrings, builder, compound, depth);
+        }
+        throw new CorruptRegionEntryException("CBIT T5: Unterminated dict structures TAG_Compound");
+    }
+
+    private static <C, L> void decodeDictNbtPutField(
+            byte[] buf,
+            int[] posRef,
+            int limit,
+            int tagType,
+            String key,
+            int chunkX,
+            int chunkZ,
+            String[] localStrings,
+            LcaDecodedChunkMeta.DirectNbtBuilder<C, L> builder,
+            C compound,
+            int depth
+    ) throws CorruptRegionEntryException {
+        switch (tagType) {
+            case Nbt.TAG_BYTE -> {
+                if (posRef[0] >= limit) throw new CorruptRegionEntryException("CBIT T5: Truncated dict TAG_Byte");
+                builder.putByte(compound, key, buf[posRef[0]++]);
+            }
+            case Nbt.TAG_SHORT -> builder.putShort(compound, key, (short) readZigZagVarInt(buf, posRef, limit));
+            case Nbt.TAG_INT -> builder.putInt(compound, key, readZigZagVarInt(buf, posRef, limit));
+            case Nbt.TAG_LONG -> builder.putLong(compound, key, readZigZagVarLong(buf, posRef, limit));
+            case Nbt.TAG_FLOAT -> {
+                if (posRef[0] + 4 > limit) throw new CorruptRegionEntryException("CBIT T5: Truncated dict TAG_Float");
+                int bits = readIntBE(buf, posRef[0]);
+                posRef[0] += 4;
+                builder.putFloat(compound, key, Float.intBitsToFloat(bits));
+            }
+            case Nbt.TAG_DOUBLE -> {
+                if (posRef[0] + 8 > limit) throw new CorruptRegionEntryException("CBIT T5: Truncated dict TAG_Double");
+                long bits = readLongBE(buf, posRef[0]);
+                posRef[0] += 8;
+                builder.putDouble(compound, key, Double.longBitsToDouble(bits));
+            }
+            case Nbt.TAG_BYTE_ARRAY -> {
+                int len = readVarIntChecked(buf, posRef, limit);
+                if (len < 0 || posRef[0] + len > limit) {
+                    throw new CorruptRegionEntryException("CBIT T5: Truncated dict TAG_Byte_Array");
+                }
+                byte[] arr = Arrays.copyOfRange(buf, posRef[0], posRef[0] + len);
+                posRef[0] += len;
+                builder.putByteArray(compound, key, arr);
+            }
+            case Nbt.TAG_STRING -> {
+                int strId = readVarIntChecked(buf, posRef, limit);
+                builder.putString(compound, key, resolveDictStructString(strId, localStrings));
+            }
+            case Nbt.TAG_LIST -> builder.putList(
+                    compound, key,
+                    decodeDictNbtListDirect(buf, posRef, limit, chunkX, chunkZ, localStrings, builder, depth));
+            case Nbt.TAG_COMPOUND -> builder.putCompound(
+                    compound, key,
+                    decodeDictNbtCompoundDirect(buf, posRef, limit, chunkX, chunkZ, localStrings, builder, depth + 1));
+            case Nbt.TAG_INT_ARRAY -> builder.putIntArray(
+                    compound, key, decodeDictIntArray(buf, posRef, limit, chunkX, chunkZ));
+            case Nbt.TAG_LONG_ARRAY -> builder.putLongArray(
+                    compound, key, decodeDictLongArray(buf, posRef, limit));
+            default -> throw new CorruptRegionEntryException("CBIT T5: Unknown dict NBT tagType: " + tagType);
+        }
+    }
+
+    private static <C, L> L decodeDictNbtListDirect(
+            byte[] buf,
+            int[] posRef,
+            int limit,
+            int chunkX,
+            int chunkZ,
+            String[] localStrings,
+            LcaDecodedChunkMeta.DirectNbtBuilder<C, L> builder,
+            int depth
+    ) throws CorruptRegionEntryException {
+        if (depth >= MAX_STRUCT_NBT_DEPTH || posRef[0] >= limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Truncated or deep dict TAG_List");
+        }
+        byte elemType = buf[posRef[0]++];
+        int cnt = readVarIntChecked(buf, posRef, limit);
+        if (cnt < 0 || cnt > Nbt.MAX_ARRAY_LENGTH) {
+            throw new CorruptRegionEntryException("CBIT T4: Invalid dict TAG_List count: " + cnt);
+        }
+        L list = builder.newList(elemType, cnt);
+        int et = elemType & 0xFF;
+        for (int i = 0; i < cnt; i++) {
+            switch (et) {
+                case Nbt.TAG_BYTE -> {
+                    if (posRef[0] >= limit) throw new CorruptRegionEntryException("CBIT T5: Truncated dict list TAG_Byte");
+                    builder.addByte(list, buf[posRef[0]++]);
+                }
+                case Nbt.TAG_SHORT -> builder.addShort(list, (short) readZigZagVarInt(buf, posRef, limit));
+                case Nbt.TAG_INT -> builder.addInt(list, readZigZagVarInt(buf, posRef, limit));
+                case Nbt.TAG_LONG -> builder.addLong(list, readZigZagVarLong(buf, posRef, limit));
+                case Nbt.TAG_FLOAT -> {
+                    if (posRef[0] + 4 > limit) throw new CorruptRegionEntryException("CBIT T5: Truncated dict list TAG_Float");
+                    int bits = readIntBE(buf, posRef[0]);
+                    posRef[0] += 4;
+                    builder.addFloat(list, Float.intBitsToFloat(bits));
+                }
+                case Nbt.TAG_DOUBLE -> {
+                    if (posRef[0] + 8 > limit) throw new CorruptRegionEntryException("CBIT T5: Truncated dict list TAG_Double");
+                    long bits = readLongBE(buf, posRef[0]);
+                    posRef[0] += 8;
+                    builder.addDouble(list, Double.longBitsToDouble(bits));
+                }
+                case Nbt.TAG_BYTE_ARRAY -> {
+                    int len = readVarIntChecked(buf, posRef, limit);
+                    if (len < 0 || posRef[0] + len > limit) {
+                        throw new CorruptRegionEntryException("CBIT T5: Truncated dict list TAG_Byte_Array");
+                    }
+                    byte[] arr = Arrays.copyOfRange(buf, posRef[0], posRef[0] + len);
+                    posRef[0] += len;
+                    builder.addByteArray(list, arr);
+                }
+                case Nbt.TAG_STRING -> {
+                    int strId = readVarIntChecked(buf, posRef, limit);
+                    builder.addString(list, resolveDictStructString(strId, localStrings));
+                }
+                case Nbt.TAG_LIST -> builder.addList(
+                        list, decodeDictNbtListDirect(buf, posRef, limit, chunkX, chunkZ, localStrings, builder, depth + 1));
+                case Nbt.TAG_COMPOUND -> builder.addCompound(
+                        list, decodeDictNbtCompoundDirect(buf, posRef, limit, chunkX, chunkZ, localStrings, builder, depth + 1));
+                case Nbt.TAG_INT_ARRAY -> builder.addIntArray(
+                        list, decodeDictIntArray(buf, posRef, limit, chunkX, chunkZ));
+                case Nbt.TAG_LONG_ARRAY -> builder.addLongArray(
+                        list, decodeDictLongArray(buf, posRef, limit));
+                default -> throw new CorruptRegionEntryException("CBIT T5: Unknown dict list tagType: " + et);
+            }
+        }
+        return list;
+    }
+
+    private static int[] decodeDictIntArray(byte[] buf, int[] posRef, int limit, int chunkX, int chunkZ)
+            throws CorruptRegionEntryException {
+        int len = readVarIntChecked(buf, posRef, limit);
+        if (len < 0 || len > Nbt.MAX_ARRAY_LENGTH) {
+            throw new CorruptRegionEntryException("CBIT T4: Invalid dict TAG_Int_Array len: " + len);
+        }
+        int[] arr = new int[len];
+        if (len == 6) {
+            int minX = readZigZagVarInt(buf, posRef, limit) + (chunkX << 4);
+            int minY = readZigZagVarInt(buf, posRef, limit);
+            int minZ = readZigZagVarInt(buf, posRef, limit) + (chunkZ << 4);
+            arr[0] = minX;
+            arr[1] = minY;
+            arr[2] = minZ;
+            arr[3] = minX + readZigZagVarInt(buf, posRef, limit);
+            arr[4] = minY + readZigZagVarInt(buf, posRef, limit);
+            arr[5] = minZ + readZigZagVarInt(buf, posRef, limit);
+            return arr;
+        }
+        for (int i = 0; i < len; i++) {
+            arr[i] = readZigZagVarInt(buf, posRef, limit);
+        }
+        return arr;
+    }
+
+    private static long[] decodeDictLongArray(byte[] buf, int[] posRef, int limit)
+            throws CorruptRegionEntryException {
+        int len = readVarIntChecked(buf, posRef, limit);
+        if (len < 0 || len > Nbt.MAX_ARRAY_LENGTH) {
+            throw new CorruptRegionEntryException("CBIT T4: Invalid dict TAG_Long_Array len: " + len);
+        }
+        long[] arr = new long[len];
+        for (int i = 0; i < len; i++) {
+            arr[i] = readZigZagVarLong(buf, posRef, limit);
+        }
+        return arr;
+    }
+
+    /**
+     * Decodes a v3 {@code EXT_FLAG_COLUMNAR_BLOCK_ENTITIES} payload directly into a caller-supplied
+     * list of compound objects via {@link DirectNbtBuilder} with zero intermediate NBT byte
+     * synthesis or {@code FastNBTParser} ({@code anvil-api-ADR-007}).
+     */
+    public static <C, L> L decodeColumnarBlockEntitiesDirect(
+            byte[] buf,
+            int start,
+            int limit,
+            int chunkX,
+            int chunkZ,
+            LcaDecodedChunkMeta.DirectNbtBuilder<C, L> builder
+    ) throws CorruptRegionEntryException {
+        int[] posRef = {start};
+        int count = readVarIntChecked(buf, posRef, limit);
+        if (count <= 0 || count > MAX_BLOCK_ENTITIES_PER_CHUNK || posRef[0] >= limit) {
+            throw new CorruptRegionEntryException("CBIT T4: Invalid columnar block_entities count " + count);
+        }
+        int beFlags = buf[posRef[0]++] & 0xFF;
+        if ((beFlags & ~0x01) != 0) {
+            throw new CorruptRegionEntryException("CBIT T5: Reserved beFlags bits set: " + beFlags);
+        }
+        boolean allInChunkXYZ = (beFlags & 1) != 0;
+        int tmplCount = readVarIntChecked(buf, posRef, limit);
+        if (tmplCount <= 0 || tmplCount > count) {
+            throw new CorruptRegionEntryException("CBIT T4: Invalid block_entities templateCount " + tmplCount);
+        }
+        int[] tmplStarts = new int[tmplCount];
+        int[] tmplEnds = new int[tmplCount];
+        for (int i = 0; i < tmplCount; i++) {
+            int tLen = readVarIntChecked(buf, posRef, limit);
+            if (tLen < 1 || posRef[0] + tLen > limit || buf[posRef[0] + tLen - 1] != Nbt.TAG_END) {
+                throw new CorruptRegionEntryException("CBIT T5: Truncated or unterminated block_entities template");
+            }
+            tmplStarts[i] = posRef[0];
+            tmplEnds[i] = posRef[0] + tLen;
+            posRef[0] += tLen;
+        }
+
+        L list = builder.newList(Nbt.TAG_COMPOUND, count);
+        int baseX = chunkX << 4;
+        int baseZ = chunkZ << 4;
+        if (allInChunkXYZ) {
+            long prevY = 0L;
+            boolean multiTmpl = tmplCount > 1;
+            for (int k = 0; k < count; k++) {
+                int tOrd = multiTmpl ? readVarIntChecked(buf, posRef, limit) : 0;
+                if (tOrd < 0 || tOrd >= tmplCount || posRef[0] >= limit) {
+                    throw new CorruptRegionEntryException("CBIT T7: block_entities templateOrd out of bounds");
+                }
+                int xz = buf[posRef[0]++] & 0xFF;
+                prevY += readZigZagVarLong(buf, posRef, limit);
+                C compound = decodeRawNbtCompoundBodyDirect(buf, tmplStarts[tOrd], tmplEnds[tOrd], builder);
+                builder.putInt(compound, "x", baseX + (xz >>> 4));
+                builder.putInt(compound, "y", (int) prevY);
+                builder.putInt(compound, "z", baseZ + (xz & 0x0F));
+                builder.addCompound(list, compound);
+            }
+        } else {
+            long prevX = 0L;
+            long prevY = 0L;
+            long prevZ = 0L;
+            for (int k = 0; k < count; k++) {
+                int hdr = readVarIntChecked(buf, posRef, limit);
+                int coordType = hdr & 3;
+                int tOrd = hdr >>> 2;
+                if (coordType == 3 || tOrd < 0 || tOrd >= tmplCount) {
+                    throw new CorruptRegionEntryException("CBIT T7: Invalid block_entities instance header");
+                }
+                C compound = decodeRawNbtCompoundBodyDirect(buf, tmplStarts[tOrd], tmplEnds[tOrd], builder);
+                if (coordType == 0) {
+                    prevX += readZigZagVarLong(buf, posRef, limit);
+                    prevY += readZigZagVarLong(buf, posRef, limit);
+                    prevZ += readZigZagVarLong(buf, posRef, limit);
+                    builder.putInt(compound, "x", (int) prevX);
+                    builder.putInt(compound, "y", (int) prevY);
+                    builder.putInt(compound, "z", (int) prevZ);
+                } else if (coordType == 1) {
+                    prevX += readZigZagVarLong(buf, posRef, limit);
+                    prevY += readZigZagVarLong(buf, posRef, limit);
+                    prevZ += readZigZagVarLong(buf, posRef, limit);
+                    builder.putIntArray(compound, "Pos", new int[] {(int) prevX, (int) prevY, (int) prevZ});
+                }
+                builder.addCompound(list, compound);
+            }
+        }
+        if (posRef[0] != limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Columnar block_entities stream trailing bytes");
+        }
+        return list;
+    }
+
+    private static <C, L> C decodeRawNbtCompoundBodyDirect(
+            byte[] buf,
+            int start,
+            int limit,
+            LcaDecodedChunkMeta.DirectNbtBuilder<C, L> builder
+    ) throws CorruptRegionEntryException {
+        int[] posRef = {start};
+        C root = decodeRawNbtCompoundDirect(buf, posRef, limit, builder, 0);
+        if (posRef[0] != limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Trailing bytes in block_entities template");
+        }
+        return root;
+    }
+
+    private static <C, L> C decodeRawNbtCompoundDirect(
+            byte[] buf,
+            int[] posRef,
+            int limit,
+            LcaDecodedChunkMeta.DirectNbtBuilder<C, L> builder,
+            int depth
+    ) throws CorruptRegionEntryException {
+        if (depth > MAX_STRUCT_NBT_DEPTH) {
+            throw new CorruptRegionEntryException("CBIT T5: Raw NBT template depth exceeded");
+        }
+        C compound = builder.newCompound();
+        while (posRef[0] < limit) {
+            int tagType = buf[posRef[0]++] & 0xFF;
+            if (tagType == Nbt.TAG_END) {
+                return compound;
+            }
+            String key = readRawNbtString(buf, posRef, limit);
+            decodeRawNbtPutField(buf, posRef, limit, tagType, key, builder, compound, depth);
+        }
+        throw new CorruptRegionEntryException("CBIT T5: Unterminated raw NBT TAG_Compound");
+    }
+
+    private static <C, L> void decodeRawNbtPutField(
+            byte[] buf,
+            int[] posRef,
+            int limit,
+            int tagType,
+            String key,
+            LcaDecodedChunkMeta.DirectNbtBuilder<C, L> builder,
+            C compound,
+            int depth
+    ) throws CorruptRegionEntryException {
+        switch (tagType) {
+            case Nbt.TAG_BYTE -> {
+                if (posRef[0] >= limit) throw new CorruptRegionEntryException("CBIT T5: Truncated raw TAG_Byte");
+                builder.putByte(compound, key, buf[posRef[0]++]);
+            }
+            case Nbt.TAG_SHORT -> {
+                if (posRef[0] + 2 > limit) throw new CorruptRegionEntryException("CBIT T5: Truncated raw TAG_Short");
+                short v = (short) (((buf[posRef[0]] & 0xFF) << 8) | (buf[posRef[0] + 1] & 0xFF));
+                posRef[0] += 2;
+                builder.putShort(compound, key, v);
+            }
+            case Nbt.TAG_INT -> {
+                if (posRef[0] + 4 > limit) throw new CorruptRegionEntryException("CBIT T5: Truncated raw TAG_Int");
+                int v = readIntBE(buf, posRef[0]);
+                posRef[0] += 4;
+                builder.putInt(compound, key, v);
+            }
+            case Nbt.TAG_LONG -> {
+                if (posRef[0] + 8 > limit) throw new CorruptRegionEntryException("CBIT T5: Truncated raw TAG_Long");
+                long v = readLongBE(buf, posRef[0]);
+                posRef[0] += 8;
+                builder.putLong(compound, key, v);
+            }
+            case Nbt.TAG_FLOAT -> {
+                if (posRef[0] + 4 > limit) throw new CorruptRegionEntryException("CBIT T5: Truncated raw TAG_Float");
+                int bits = readIntBE(buf, posRef[0]);
+                posRef[0] += 4;
+                builder.putFloat(compound, key, Float.intBitsToFloat(bits));
+            }
+            case Nbt.TAG_DOUBLE -> {
+                if (posRef[0] + 8 > limit) throw new CorruptRegionEntryException("CBIT T5: Truncated raw TAG_Double");
+                long bits = readLongBE(buf, posRef[0]);
+                posRef[0] += 8;
+                builder.putDouble(compound, key, Double.longBitsToDouble(bits));
+            }
+            case Nbt.TAG_BYTE_ARRAY -> builder.putByteArray(compound, key, readRawByteArray(buf, posRef, limit));
+            case Nbt.TAG_STRING -> builder.putString(compound, key, readRawNbtString(buf, posRef, limit));
+            case Nbt.TAG_LIST -> builder.putList(
+                    compound, key, decodeRawNbtListDirect(buf, posRef, limit, builder, depth));
+            case Nbt.TAG_COMPOUND -> builder.putCompound(
+                    compound, key, decodeRawNbtCompoundDirect(buf, posRef, limit, builder, depth + 1));
+            case Nbt.TAG_INT_ARRAY -> builder.putIntArray(compound, key, readRawIntArray(buf, posRef, limit));
+            case Nbt.TAG_LONG_ARRAY -> builder.putLongArray(compound, key, readRawLongArray(buf, posRef, limit));
+            default -> throw new CorruptRegionEntryException("CBIT T5: Unknown raw NBT tagType: " + tagType);
+        }
+    }
+
+    private static <C, L> L decodeRawNbtListDirect(
+            byte[] buf,
+            int[] posRef,
+            int limit,
+            LcaDecodedChunkMeta.DirectNbtBuilder<C, L> builder,
+            int depth
+    ) throws CorruptRegionEntryException {
+        if (depth >= MAX_STRUCT_NBT_DEPTH || posRef[0] + 5 > limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Truncated or deep raw TAG_List");
+        }
+        byte elemType = buf[posRef[0]++];
+        int cnt = readIntBE(buf, posRef[0]);
+        posRef[0] += 4;
+        if (cnt < 0 || cnt > Nbt.MAX_ARRAY_LENGTH) {
+            throw new CorruptRegionEntryException("CBIT T4: Invalid raw TAG_List count: " + cnt);
+        }
+        L list = builder.newList(elemType, cnt);
+        int et = elemType & 0xFF;
+        for (int i = 0; i < cnt; i++) {
+            switch (et) {
+                case Nbt.TAG_BYTE -> {
+                    if (posRef[0] >= limit) throw new CorruptRegionEntryException("CBIT T5: Truncated raw list TAG_Byte");
+                    builder.addByte(list, buf[posRef[0]++]);
+                }
+                case Nbt.TAG_SHORT -> {
+                    if (posRef[0] + 2 > limit) throw new CorruptRegionEntryException("CBIT T5: Truncated raw list TAG_Short");
+                    short v = (short) (((buf[posRef[0]] & 0xFF) << 8) | (buf[posRef[0] + 1] & 0xFF));
+                    posRef[0] += 2;
+                    builder.addShort(list, v);
+                }
+                case Nbt.TAG_INT -> {
+                    if (posRef[0] + 4 > limit) throw new CorruptRegionEntryException("CBIT T5: Truncated raw list TAG_Int");
+                    builder.addInt(list, readIntBE(buf, posRef[0]));
+                    posRef[0] += 4;
+                }
+                case Nbt.TAG_LONG -> {
+                    if (posRef[0] + 8 > limit) throw new CorruptRegionEntryException("CBIT T5: Truncated raw list TAG_Long");
+                    builder.addLong(list, readLongBE(buf, posRef[0]));
+                    posRef[0] += 8;
+                }
+                case Nbt.TAG_FLOAT -> {
+                    if (posRef[0] + 4 > limit) throw new CorruptRegionEntryException("CBIT T5: Truncated raw list TAG_Float");
+                    builder.addFloat(list, Float.intBitsToFloat(readIntBE(buf, posRef[0])));
+                    posRef[0] += 4;
+                }
+                case Nbt.TAG_DOUBLE -> {
+                    if (posRef[0] + 8 > limit) throw new CorruptRegionEntryException("CBIT T5: Truncated raw list TAG_Double");
+                    builder.addDouble(list, Double.longBitsToDouble(readLongBE(buf, posRef[0])));
+                    posRef[0] += 8;
+                }
+                case Nbt.TAG_BYTE_ARRAY -> builder.addByteArray(list, readRawByteArray(buf, posRef, limit));
+                case Nbt.TAG_STRING -> builder.addString(list, readRawNbtString(buf, posRef, limit));
+                case Nbt.TAG_LIST -> builder.addList(
+                        list, decodeRawNbtListDirect(buf, posRef, limit, builder, depth + 1));
+                case Nbt.TAG_COMPOUND -> builder.addCompound(
+                        list, decodeRawNbtCompoundDirect(buf, posRef, limit, builder, depth + 1));
+                case Nbt.TAG_INT_ARRAY -> builder.addIntArray(list, readRawIntArray(buf, posRef, limit));
+                case Nbt.TAG_LONG_ARRAY -> builder.addLongArray(list, readRawLongArray(buf, posRef, limit));
+                default -> throw new CorruptRegionEntryException("CBIT T5: Unknown raw list tagType: " + et);
+            }
+        }
+        return list;
+    }
+
+    private static String readRawNbtString(byte[] buf, int[] posRef, int limit)
+            throws CorruptRegionEntryException {
+        if (posRef[0] + 2 > limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Truncated raw NBT string length");
+        }
+        int uLen = ((buf[posRef[0]] & 0xFF) << 8) | (buf[posRef[0] + 1] & 0xFF);
+        posRef[0] += 2;
+        if (posRef[0] + uLen > limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Truncated raw NBT string bytes");
+        }
+        String s = new String(buf, posRef[0], uLen, StandardCharsets.UTF_8);
+        posRef[0] += uLen;
+        return s;
+    }
+
+    private static byte[] readRawByteArray(byte[] buf, int[] posRef, int limit)
+            throws CorruptRegionEntryException {
+        if (posRef[0] + 4 > limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Truncated raw TAG_Byte_Array len");
+        }
+        int len = readIntBE(buf, posRef[0]);
+        posRef[0] += 4;
+        if (len < 0 || posRef[0] + len > limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Invalid raw TAG_Byte_Array len: " + len);
+        }
+        byte[] arr = Arrays.copyOfRange(buf, posRef[0], posRef[0] + len);
+        posRef[0] += len;
+        return arr;
+    }
+
+    private static int[] readRawIntArray(byte[] buf, int[] posRef, int limit)
+            throws CorruptRegionEntryException {
+        if (posRef[0] + 4 > limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Truncated raw TAG_Int_Array len");
+        }
+        int len = readIntBE(buf, posRef[0]);
+        posRef[0] += 4;
+        if (len < 0 || (long) posRef[0] + ((long) len << 2) > limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Invalid raw TAG_Int_Array len: " + len);
+        }
+        int[] arr = new int[len];
+        for (int i = 0; i < len; i++) {
+            arr[i] = readIntBE(buf, posRef[0]);
+            posRef[0] += 4;
+        }
+        return arr;
+    }
+
+    private static long[] readRawLongArray(byte[] buf, int[] posRef, int limit)
+            throws CorruptRegionEntryException {
+        if (posRef[0] + 4 > limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Truncated raw TAG_Long_Array len");
+        }
+        int len = readIntBE(buf, posRef[0]);
+        posRef[0] += 4;
+        if (len < 0 || (long) posRef[0] + ((long) len << 3) > limit) {
+            throw new CorruptRegionEntryException("CBIT T5: Invalid raw TAG_Long_Array len: " + len);
+        }
+        long[] arr = new long[len];
+        for (int i = 0; i < len; i++) {
+            arr[i] = readLongBE(buf, posRef[0]);
+            posRef[0] += 8;
+        }
+        return arr;
+    }
+
+    private static int readIntBE(byte[] buf, int off) {
+        return ((buf[off] & 0xFF) << 24)
+                | ((buf[off + 1] & 0xFF) << 16)
+                | ((buf[off + 2] & 0xFF) << 8)
+                | (buf[off + 3] & 0xFF);
+    }
+
+    private static long readLongBE(byte[] buf, int off) {
+        return (((long) readIntBE(buf, off)) << 32) | (readIntBE(buf, off + 4) & 0xFFFF_FFFFL);
     }
 
     private static final class ByteArrayKey {

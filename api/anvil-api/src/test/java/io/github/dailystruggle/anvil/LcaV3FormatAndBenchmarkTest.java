@@ -19,6 +19,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.zip.DataFormatException;
 import java.util.zip.Deflater;
 import java.util.zip.DeflaterOutputStream;
@@ -185,7 +186,7 @@ class LcaV3FormatAndBenchmarkTest {
         assertThrows(CorruptRegionEntryException.class,
                 () -> LcaV3Codec.validateExtFlags(0x8002, 0x01, LcaRegionReader.LCA_FORMAT_VERSION_V3));
         assertThrows(CorruptRegionEntryException.class,
-                () -> LcaV3Codec.validateExtFlags(0x8000, 0x08, LcaRegionReader.LCA_FORMAT_VERSION_V3));
+                () -> LcaV3Codec.validateExtFlags(0x8000, 0x20, LcaRegionReader.LCA_FORMAT_VERSION_V3));
     }
 
     @Test
@@ -301,39 +302,39 @@ class LcaV3FormatAndBenchmarkTest {
             double v3FullBNbtUs = measureReadNbtBytesUs(v3FullB, coords, sweeps);
 
             int n = coords.size();
-            System.out.printf(Locale.ROOT, "\n--- Fixture: %s (%d chunks, .mca = %,d B) ---\n",
+            System.out.printf(Locale.ROOT, "%n--- Fixture: %s (%d chunks, .mca = %,d B) ---%n",
                     regionNames.get(r), n, mca.length);
             System.out.printf(Locale.ROOT,
-                    "  %-24s | %10s | %8s | %9s | %10s | %11s | %11s\n",
+                    "  %-24s | %10s | %8s | %9s | %10s | %11s | %11s%n",
                     "Format", "Size (B)", "vs .mca", "vs v2", "Enc us/chk", "DOM Rd us", "NBT Rd us");
             System.out.printf(Locale.ROOT,
-                    "  %-24s | %,10d | %7.2f%% | %9s | %10s | %11.2f | %11s\n",
+                    "  %-24s | %,10d | %7.2f%% | %9s | %10s | %11.2f | %11s%n",
                     ".mca (Zlib)", mca.length, 100.0, "-", "-", mcaReadUs, "-");
             System.out.printf(Locale.ROOT,
-                    "  %-24s | %,10d | %7.2f%% | %8.2f%% | %10.2f | %11.2f | %11s\n",
+                    "  %-24s | %,10d | %7.2f%% | %8.2f%% | %10.2f | %11.2f | %11s%n",
                     "v2 Mode A (0-LZ)", v2A.length, 100.0 * v2A.length / mca.length, 0.0,
                     tV2AEnc / 1000.0 / n, v2AReadUs, "-");
             System.out.printf(Locale.ROOT,
-                    "  %-24s | %,10d | %7.2f%% | %8.2f%% | %10.2f | %11.2f | %11s\n",
+                    "  %-24s | %,10d | %7.2f%% | %8.2f%% | %10.2f | %11.2f | %11s%n",
                     "v3-Fast Mode A", v3FastA.length, 100.0 * v3FastA.length / mca.length,
                     100.0 * (v3FastA.length - v2A.length) / v2A.length,
                     tV3FastAEnc / 1000.0 / n, v3FastAReadUs, "-");
             System.out.printf(Locale.ROOT,
-                    "  %-24s | %,10d | %7.2f%% | %8.2f%% | %10.2f | %11.2f | %11s\n",
+                    "  %-24s | %,10d | %7.2f%% | %8.2f%% | %10.2f | %11.2f | %11s%n",
                     "v3-Full Mode A (Eik+B1)", v3FullA.length, 100.0 * v3FullA.length / mca.length,
                     100.0 * (v3FullA.length - v2A.length) / v2A.length,
                     tV3FullAEnc / 1000.0 / n, v3FullAReadUs, "-");
             System.out.printf(Locale.ROOT,
-                    "  %-24s | %,10d | %7.2f%% | %8.2f%% | %10.2f | %11.2f | %11.2f\n",
+                    "  %-24s | %,10d | %7.2f%% | %8.2f%% | %10.2f | %11.2f | %11.2f%n",
                     "v2 Mode B (LCD2)", v2B.length, 100.0 * v2B.length / mca.length, 0.0,
                     tV2BEnc / 1000.0 / n, v2BReadUs, v2BNbtUs);
             System.out.printf(Locale.ROOT,
-                    "  %-24s | %,10d | %7.2f%% | %8.2f%% | %10.2f | %11.2f | %11.2f\n",
+                    "  %-24s | %,10d | %7.2f%% | %8.2f%% | %10.2f | %11.2f | %11.2f%n",
                     "v3-Fast Mode B", v3FastB.length, 100.0 * v3FastB.length / mca.length,
                     100.0 * (v3FastB.length - v2B.length) / v2B.length,
                     tV3FastBEnc / 1000.0 / n, v3FastBReadUs, v3FastBNbtUs);
             System.out.printf(Locale.ROOT,
-                    "  %-24s | %,10d | %7.2f%% | %8.2f%% | %10.2f | %11.2f | %11.2f\n",
+                    "  %-24s | %,10d | %7.2f%% | %8.2f%% | %10.2f | %11.2f | %11.2f%n",
                     "v3-Full Mode B (Eik+B1)", v3FullB.length, 100.0 * v3FullB.length / mca.length,
                     100.0 * (v3FullB.length - v2B.length) / v2B.length,
                     tV3FullBEnc / 1000.0 / n, v3FullBReadUs, v3FullBNbtUs);
@@ -387,21 +388,21 @@ class LcaV3FormatAndBenchmarkTest {
         double v3ColEikBViewUs = measureReadViewUs(v3ColEikB, coords, sweeps);
         double v3FullBViewUs = measureReadViewUs(v3FullB, coords, sweeps);
 
-        System.out.printf(Locale.ROOT, "\n--- Live 26.3 Overworld Sample (%d chunks across 8 strided regions) ---\n", n);
-        System.out.printf(Locale.ROOT, "  v2 Mode A:             %,10d B\n", v2A.length);
-        System.out.printf(Locale.ROOT, "  v3-Fast Mode A:        %,10d B (%+.2f%% vs v2)\n",
+        System.out.printf(Locale.ROOT, "%n--- Live 26.3 Overworld Sample (%d chunks across 8 strided regions) ---%n", n);
+        System.out.printf(Locale.ROOT, "  v2 Mode A:             %,10d B%n", v2A.length);
+        System.out.printf(Locale.ROOT, "  v3-Fast Mode A:        %,10d B (%+.2f%% vs v2)%n",
                 v3FastA.length, 100.0 * (v3FastA.length - v2A.length) / v2A.length);
-        System.out.printf(Locale.ROOT, "  v3-Full Mode A:        %,10d B (%+.2f%% vs v2)\n",
+        System.out.printf(Locale.ROOT, "  v3-Full Mode A:        %,10d B (%+.2f%% vs v2)%n",
                 v3FullA.length, 100.0 * (v3FullA.length - v2A.length) / v2A.length);
-        System.out.printf(Locale.ROOT, "  v2 Mode B:             %,10d B | NBT Rd: %6.2f us | View Rd (skipLight): %5.2f us\n",
+        System.out.printf(Locale.ROOT, "  v2 Mode B:             %,10d B | NBT Rd: %6.2f us | View Rd (skipLight): %5.2f us%n",
                 v2B.length, v2BNbtUs, v2BViewUs);
-        System.out.printf(Locale.ROOT, "  v3-Columnar Mode B:    %,10d B (%+.2f%% vs v2) | NBT Rd: %6.2f us | View Rd: %5.2f us\n",
+        System.out.printf(Locale.ROOT, "  v3-Columnar Mode B:    %,10d B (%+.2f%% vs v2) | NBT Rd: %6.2f us | View Rd: %5.2f us%n",
                 v3ColB.length, 100.0 * (v3ColB.length - v2B.length) / v2B.length, v3ColBNbtUs, v3ColBViewUs);
-        System.out.printf(Locale.ROOT, "  v3-Col+RankEx Mode B:  %,10d B (%+.2f%% vs v2) | NBT Rd: %6.2f us | View Rd: %5.2f us\n",
+        System.out.printf(Locale.ROOT, "  v3-Col+RankEx Mode B:  %,10d B (%+.2f%% vs v2) | NBT Rd: %6.2f us | View Rd: %5.2f us%n",
                 v3FastB.length, 100.0 * (v3FastB.length - v2B.length) / v2B.length, v3FastBNbtUs, v3FastBViewUs);
-        System.out.printf(Locale.ROOT, "  v3-Col+EikB1 Mode B:   %,10d B (%+.2f%% vs v2) | NBT Rd: %6.2f us | View Rd: %5.2f us\n",
+        System.out.printf(Locale.ROOT, "  v3-Col+EikB1 Mode B:   %,10d B (%+.2f%% vs v2) | NBT Rd: %6.2f us | View Rd: %5.2f us%n",
                 v3ColEikB.length, 100.0 * (v3ColEikB.length - v2B.length) / v2B.length, v3ColEikBNbtUs, v3ColEikBViewUs);
-        System.out.printf(Locale.ROOT, "  v3-Full Mode B:        %,10d B (%+.2f%% vs v2) | NBT Rd: %6.2f us | View Rd: %5.2f us\n",
+        System.out.printf(Locale.ROOT, "  v3-Full Mode B:        %,10d B (%+.2f%% vs v2) | NBT Rd: %6.2f us | View Rd: %5.2f us%n",
                 v3FullB.length, 100.0 * (v3FullB.length - v2B.length) / v2B.length, v3FullBNbtUs, v3FullBViewUs);
     }
 
@@ -491,6 +492,14 @@ class LcaV3FormatAndBenchmarkTest {
             }
         }
         assertTrue(!coords.isEmpty(), "Expected generated chunks in benchmark fixture");
+        if (coords.size() < 64) {
+            expandSingleChunkFixture(coords, roots, 64);
+            rawNbtList.clear();
+            for (LinkedHashMap<String, Object> root : roots) {
+                rawNbtList.add(Nbt.writeNamedRoot("", root));
+            }
+            label = label + " (expanded 64-chunk fixture)";
+        }
         int n = coords.size();
         int dataVersion = AnvilReader.getDataVersion(roots.get(0));
 
@@ -597,13 +606,13 @@ class LcaV3FormatAndBenchmarkTest {
         };
 
         System.out.printf(Locale.ROOT,
-                "\n================ [WARMED 64-CHUNK ENCODE & DECODE vs .MCA ZLIB: %s (sink=%d)] ================\n",
+                "%n================ [WARMED 64-CHUNK ENCODE & DECODE vs .MCA ZLIB: %s (sink=%d)] ================%n",
                 label, sink);
         System.out.printf(Locale.ROOT,
-                "  %-26s | %10s | %7s | %10s | %10s | %10s | %10s | %10s\n",
+                "  %-26s | %10s | %7s | %10s | %10s | %10s | %10s | %10s%n",
                 "Format", "Size (B)", "vs .mca", "DOM Save", "Strm Save", "RawNBT Rd", "DOM Rd", "View Rd");
         System.out.printf(Locale.ROOT,
-                "  %-26s | %,10d | %6.2f%% | %7.2f us | %7.2f us | %7.2f us | %7.2f us | %7.2f us\n",
+                "  %-26s | %,10d | %6.2f%% | %7.2f us | %7.2f us | %7.2f us | %7.2f us | %7.2f us%n",
                 "Vanilla .mca (Zlib)", benchMca.length, 100.0,
                 mcaDomSaveUs, mcaStreamSaveUs, mcaRawNbtRdUs, mcaDomRdUs, mcaViewRdUs);
 
@@ -642,7 +651,7 @@ class LcaV3FormatAndBenchmarkTest {
             });
 
             System.out.printf(Locale.ROOT,
-                    "  %-26s | %,10d | %6.2f%% | %7.2f us | %7.2f us | %7.2f us | %7.2f us | %7.2f us\n",
+                    "  %-26s | %,10d | %6.2f%% | %7.2f us | %7.2f us | %7.2f us | %7.2f us | %7.2f us%n",
                     names[k], regionBytes.length, 100.0 * regionBytes.length / benchMca.length,
                     domSaveUs, streamSaveUs, rawNbtRdUs, domRdUs, viewRdUs);
         }
@@ -750,7 +759,7 @@ class LcaV3FormatAndBenchmarkTest {
         return out;
     }
 
-    private static byte[] readMcaRawNbtBytes(byte[] mca, int rx, int rz) throws IOException, DataFormatException {
+    private static byte[] readMcaRawNbtBytes(byte[] mca, int rx, int rz) throws DataFormatException {
         int hOff = ((rx & 31) + ((rz & 31) << 5)) * 4;
         int loc = ((mca[hOff] & 0xFF) << 24)
                 | ((mca[hOff + 1] & 0xFF) << 16)
@@ -810,6 +819,14 @@ class LcaV3FormatAndBenchmarkTest {
                         rawNbtList.add(Nbt.writeNamedRoot("", e.root));
                     }
                 }
+            }
+        }
+        assertTrue(!coords.isEmpty(), "Expected generated chunks in benchmark fixture");
+        if (coords.size() < 64) {
+            expandSingleChunkFixture(coords, roots, 64);
+            rawNbtList.clear();
+            for (LinkedHashMap<String, Object> root : roots) {
+                rawNbtList.add(Nbt.writeNamedRoot("", root));
             }
         }
         int n = coords.size();
@@ -918,21 +935,455 @@ class LcaV3FormatAndBenchmarkTest {
         }
 
         System.out.printf(Locale.ROOT,
-                "\n================ [PRODUCTION LCD2 TIERS: 64-chunk overworld_mountain (sink=%d)] ================\n",
+                "%n================ [PRODUCTION LCD2 TIERS: 64-chunk overworld_mountain (sink=%d)] ================%n",
                 sink);
         System.out.printf(Locale.ROOT,
-                "  %-32s | %9s | %10s | %7s | %8s | %10s | %10s | %8s\n",
+                "  %-32s | %9s | %10s | %7s | %8s | %10s | %10s | %8s%n",
                 "LCD2 Production Tier", "Body (B)", "Est.LCA(B)", "vs .mca", "vs Exh", "LCD2 Enc", "LCD2 Dec", "Enc Spdp");
         for (int vIdx = 0; vIdx < variantNames.length; vIdx++) {
             double vsMcaPct = 100.0 * alignedRegionBytes[vIdx] / benchMca.length;
             double vsExhPct = 100.0 * (alignedRegionBytes[vIdx] - alignedRegionBytes[0]) / alignedRegionBytes[0];
             System.out.printf(Locale.ROOT,
-                    "  %-32s | %,9d | %,10d | %6.2f%% | %+6.2f%% | %7.2f us | %7.2f us | %6.2fx\n",
+                    "  %-32s | %,9d | %,10d | %6.2f%% | %+6.2f%% | %7.2f us | %7.2f us | %6.2fx%n",
                     variantNames[vIdx], rawBodyBytes[vIdx], alignedRegionBytes[vIdx],
                     vsMcaPct, vsExhPct, encUsArr[vIdx], decUsArr[vIdx], encUsArr[0] / Math.max(0.01, encUsArr[vIdx]));
         }
         System.out.println("===============================================================================================================");
         assertTrue(encUsArr[1] < encUsArr[0], "FastGreedy LCD2 (level=1) must encode faster than Exhaustive LCD2 (level=3)");
         assertTrue(alignedRegionBytes[1] < benchMca.length, "FastGreedy-1 must remain far smaller than .mca");
+    }
+
+    @Test
+    @DisplayName("anvil-api-ADR-006: SEC_EXT_GRAY_BITPLANES (0x02) round-trip across all curves & palettes 2..64, O(1) skip, Tier-3 recovery, and CBIT T5/T6/T6b rejection")
+    void grayBitplanesRoundTripSkipRecoveryAndCbitFaults() throws Exception {
+        // 1. Direct codec round-trip across all 4 curve IDs, partial/full octreeMask64, and palette sizes 2..64
+        int[] paletteSizes = {2, 3, 4, 7, 8, 16, 32, 64};
+        List<String> dictCanon = new ArrayList<>(64);
+        List<String> dictBase = new ArrayList<>(64);
+        for (int i = 0; i < 64; i++) {
+            String s = "graymod:stratum_" + i;
+            dictCanon.add(s);
+            dictBase.add(s);
+        }
+        LcaSectionCodec.ScratchArena arena = LcaSectionCodec.scratch();
+        byte[] grayBuf = new byte[16384];
+        int[] remapped = new int[64];
+
+        for (int pLen : paletteSizes) {
+            int[] sortedGlobalIds = new int[pLen];
+            for (int i = 0; i < pLen; i++) sortedGlobalIds[i] = i;
+
+            for (boolean partialMask : new boolean[] {true, false}) {
+                int[] yzxOrd = new int[LcaSectionCodec.SECTION_VOXELS];
+                long octreeMask64 = 0L;
+                for (int y = 0; y < 16; y++) {
+                    for (int z = 0; z < 16; z++) {
+                        for (int x = 0; x < 16; x++) {
+                            if (partialMask && y >= 8) continue; // upper half is dominant 0 -> partial octreeMask64
+                            int yzx = (y << 8) | (z << 4) | x;
+                            int v = ((y * 2 + (z >> 2) + (x >> 3)) % pLen);
+                            yzxOrd[yzx] = v;
+                            if (v != 0) {
+                                octreeMask64 |= (1L << LcaSectionCodec.YZX_TO_OCTANT6[yzx]);
+                            }
+                        }
+                    }
+                }
+                if (octreeMask64 == 0L) {
+                    yzxOrd[1] = 1;
+                    octreeMask64 = 1L;
+                }
+
+                for (int curveId = 0; curveId < 4; curveId++) {
+                    int activeVoxels = LcaSectionCodec.populateCompactedCurvePaletteIdx(
+                            yzxOrd, curveId, octreeMask64, arena.curvePaletteIdx);
+                    int grayLen = LcaV3Codec.tryEncodeAdjacencyGrayBitplanes(
+                            arena.curvePaletteIdx, activeVoxels, pLen, sortedGlobalIds, remapped, grayBuf);
+                    assertTrue(grayLen > 0, "Expected valid Gray bitplane payload for pLen=" + pLen);
+                    assertEquals(sortedGlobalIds[0], remapped[0], "Dominant palette[0] must remain pinned");
+
+                    // Frame as a full SectionFrame with SEC_EXT_GRAY_BITPLANES = 0x02
+                    int blockMode = (octreeMask64 == -1L)
+                            ? LcaSectionCodec.BLOCK_MODE_DELTA_ROARING_FULL_MASK
+                            : LcaSectionCodec.BLOCK_MODE_DELTA_ROARING;
+                    byte[] secFrame = new byte[128 + grayLen];
+                    int pos = 0;
+                    secFrame[pos++] = (byte) ((curveId << 6) | (blockMode << 4));
+                    if (blockMode == LcaSectionCodec.BLOCK_MODE_DELTA_ROARING) {
+                        LcaSectionCodec.writeLongBEToBuf(secFrame, pos, octreeMask64);
+                        pos += 8;
+                    }
+                    secFrame[pos++] = 0;
+                    secFrame[pos++] = (byte) LcaV3Codec.SEC_EXT_GRAY_BITPLANES;
+                    pos = LcaSectionCodec.writeVarIntToBuf(secFrame, pos, pLen);
+                    for (int i = 0; i < pLen; i++) {
+                        pos = LcaSectionCodec.writeVarIntToBuf(secFrame, pos, remapped[i]);
+                    }
+                    pos = LcaSectionCodec.writeVarIntToBuf(secFrame, pos, grayLen);
+                    System.arraycopy(grayBuf, 0, secFrame, pos, grayLen);
+                    pos += grayLen;
+                    secFrame[pos++] = 0; // biome bLen=0
+                    byte[] exactFrame = Arrays.copyOf(secFrame, pos);
+
+                    // O(1) skipSectionFrame parity
+                    assertEquals(exactFrame.length,
+                            LcaSectionCodec.skipSectionFrame(exactFrame, 0, exactFrame.length,
+                                    LcaRegionReader.LCA_FORMAT_VERSION_V3));
+
+                    // decodeSectionFrame parity
+                    LcaSectionCodec.DecodedSection dec = LcaSectionCodec.decodeSectionFrame(
+                            exactFrame, 0, exactFrame.length, 0,
+                            dictCanon, dictBase, List.of("minecraft:plains"), List.of(),
+                            true, true, LcaRegionReader.LCA_FORMAT_VERSION_V3);
+                    int bits = Math.max(4, 32 - Integer.numberOfLeadingZeros(pLen - 1));
+                    int entriesPerLong = 64 / bits;
+                    long mask = (1L << bits) - 1L;
+                    for (int yzx = 0; yzx < LcaSectionCodec.SECTION_VOXELS; yzx++) {
+                        int decOrd = (int) ((dec.packedBlockLongs[yzx / entriesPerLong] >>> ((yzx % entriesPerLong) * bits)) & mask);
+                        assertEquals(dictBase.get(yzxOrd[yzx]), dec.blockBaseNamePalette.get(decOrd),
+                                "Mismatch at pLen=" + pLen + " curve=" + curveId + " yzx=" + yzx);
+                    }
+
+                    // decodeSectionFrameBlockOrdinals parity
+                    int[] decOrds = new int[LcaSectionCodec.SECTION_VOXELS];
+                    int[] decPal = LcaSectionCodec.decodeSectionFrameBlockOrdinals(
+                            exactFrame, exactFrame.length, decOrds, null);
+                    assertEquals(pLen, decPal.length);
+                    for (int yzx = 0; yzx < LcaSectionCodec.SECTION_VOXELS; yzx++) {
+                        assertEquals(yzxOrd[yzx], decPal[decOrds[yzx]]);
+                    }
+                }
+            }
+        }
+
+        // 2. End-to-end chunk encode/decode + Tier-3 dominant recovery + CBIT T5/T6/T6b fault injection
+        LinkedHashMap<String, Object> chunkRoot = new LinkedHashMap<>();
+        chunkRoot.put("DataVersion", 4671);
+        chunkRoot.put("xPos", 0);
+        chunkRoot.put("zPos", 0);
+        chunkRoot.put("yPos", -4);
+        chunkRoot.put("Status", "minecraft:full");
+
+        // Build a smoothly stratified 16-state 3D stepped-band section (smooth adjacent transitions -> Gray bitplanes strictly beat Delta-Roaring!)
+        List<Object> pal = new ArrayList<>();
+        for (int i = 0; i < 16; i++) {
+            LinkedHashMap<String, Object> entry = new LinkedHashMap<>();
+            entry.put("Name", "graymod:layer_" + i);
+            pal.add(entry);
+        }
+        long[] packed = new long[256];
+        for (int y = 0; y < 16; y++) {
+            for (int z = 0; z < 16; z++) {
+                for (int x = 0; x < 16; x++) {
+                    int yzx = (y << 8) | (z << 4) | x;
+                    int s = (y < 4) ? 0 : (((y - 4) + ((x + z) >>> 3)) % 16);
+                    packed[yzx / 16] |= ((long) s) << ((yzx % 16) * 4);
+                }
+            }
+        }
+        LinkedHashMap<String, Object> sec = new LinkedHashMap<>();
+        sec.put("Y", (byte) 0);
+        LinkedHashMap<String, Object> bs = new LinkedHashMap<>();
+        bs.put("palette", new Nbt.NbtList(Nbt.TAG_COMPOUND, pal));
+        bs.put("data", packed);
+        sec.put("block_states", bs);
+        LinkedHashMap<String, Object> biomes = new LinkedHashMap<>();
+        biomes.put("palette", new Nbt.NbtList(Nbt.TAG_STRING, List.of("minecraft:plains")));
+        sec.put("biomes", biomes);
+        chunkRoot.put("sections", new Nbt.NbtList(Nbt.TAG_COMPOUND, List.of(sec)));
+
+        LcaV3Codec.setThreadFeatureMask(LcaV3Codec.DEFAULT_V3_FEATURES | LcaV3Codec.FEATURE_GRAY_BITPLANES);
+        byte[] lcaBytes;
+        byte[] rawFrame;
+        try {
+            LcaRegionWriter.LcaLiveArchive arch =
+                    LcaRegionWriter.createEmptyLiveArchive(0, 0, -4, 24, 4671, false, 1024);
+            arch.saveChunkCoW(0, 0, chunkRoot);
+            lcaBytes = arch.toByteArray();
+            rawFrame = arch.readUncompressedChunkFrame(0, 0);
+        } finally {
+            LcaV3Codec.resetThreadFeatureMask();
+        }
+
+        // Confirm SEC_EXT_GRAY_BITPLANES (0x02) was actually selected for section index 4 (Y = 0)
+        int secDirEnd = 24 + (24 << 1);
+        int entry16 = LcaSectionCodec.readUint16BE(rawFrame, 24 + (4 << 1));
+        assertTrue(entry16 > 0 && (entry16 & 0x8000) == 0);
+        int secRelStart = secDirEnd + (entry16 - 1);
+        int secHdr = rawFrame[secRelStart] & 0xFF;
+        int secBlockMode = (secHdr >>> 4) & 3;
+        int palEscapeOff = secRelStart + 1 + (secBlockMode == LcaSectionCodec.BLOCK_MODE_DELTA_ROARING ? 8 : 0);
+        assertEquals(0, rawFrame[palEscapeOff] & 0xFF, "Expected v3 paletteLen == 0 escape");
+        assertEquals(LcaV3Codec.SEC_EXT_GRAY_BITPLANES, rawFrame[palEscapeOff + 1] & 0xFF,
+                "Expected SEC_EXT_GRAY_BITPLANES (0x02) to win on stratified 16-state section");
+
+        // Verify full round-trip via readChunk, readChunkNbtBytes, and readChunkView
+        AnvilChunkView origView = AnvilReader.toView(chunkRoot);
+        AnvilChunkView decView = LcaRegionReader.readChunkView(lcaBytes, 0, 0);
+        AnvilChunkView decNbtView = AnvilReader.toView(
+                Nbt.readRootCompound(LcaRegionReader.INSTANCE.readChunkNbtBytes(lcaBytes, 0, 0)));
+        AnvilChunkView decChunkView = AnvilReader.toView(
+                LcaRegionReader.INSTANCE.readChunk(lcaBytes, 0, 0).root);
+        for (int y = 0; y < 16; y++) {
+            for (int z = 0; z < 16; z++) {
+                for (int x = 0; x < 16; x++) {
+                    String exp = origView.blockIdAt(x, y, z);
+                    assertEquals(exp, decView.blockIdAt(x, y, z));
+                    assertEquals(exp, decNbtView.blockIdAt(x, y, z));
+                    assertEquals(exp, decChunkView.blockIdAt(x, y, z));
+                }
+            }
+        }
+
+        // CBIT T5: reserved secExtFlags (0x04) & mutually exclusive (0x03) must fail closed
+        long ptr = LcaRegionReader.getVolatileLongBE(lcaBytes, LcaRegionReader.POINTER_DIRECTORY_OFFSET);
+        int fStart = (int) ((ptr >>> 29) << LcaRegionReader.SLAB_SHIFT);
+        for (int badFlags : new int[] {0x03, 0x04, 0x80}) {
+            byte[] badFlagsLca = Arrays.copyOf(lcaBytes, lcaBytes.length);
+            badFlagsLca[fStart + palEscapeOff + 1] = (byte) badFlags;
+            assertThrows(CorruptRegionEntryException.class,
+                    () -> LcaRegionReader.readChunkView(badFlagsLca, 0, 0));
+        }
+
+        // CBIT T6b: corrupting octreeOccupancyMask64 fails closed in readChunkView and recovers dominant palette[0] in readChunkViewWithRecovery!
+        if (secBlockMode == LcaSectionCodec.BLOCK_MODE_DELTA_ROARING) {
+            byte[] badMaskLca = Arrays.copyOf(lcaBytes, lcaBytes.length);
+            badMaskLca[fStart + secRelStart + 1] ^= 0x01; // flip bit in octreeMask64
+            assertThrows(CorruptRegionEntryException.class,
+                    () -> LcaRegionReader.readChunkView(badMaskLca, 0, 0));
+            LcaRegionReader.RecoveryReport rep = new LcaRegionReader.RecoveryReport();
+            AnvilChunkView recovered = LcaRegionReader.readChunkViewWithRecovery(badMaskLca, 0, 0, rep);
+            assertNotNull(recovered);
+            assertEquals("graymod:layer_0", recovered.blockIdAt(0, 0, 0),
+                    "Tier-3 recovery on SEC_EXT_GRAY_BITPLANES must quarantine to pinned dominant palette[0]");
+        }
+
+        // CBIT T5/T6 direct unit checks: forbidden planeMode=2, truncated payloadLen, and invGray(g) >= paletteLen
+        byte[] badPlaneMode = new byte[] {
+            1, // payloadByteLen = 1
+            (byte) 0x02 // plane 0 mode = 2 (forbidden)
+        };
+        assertThrows(CorruptRegionEntryException.class, () -> LcaV3Codec.decodeGrayBitplaneBlocks(
+                badPlaneMode, 0, badPlaneMode.length, 3, LcaSectionCodec.CURVE_YZX, -1L, new long[256], 4));
+
+        // paletteLen = 3 (valid ordinals 0,1,2 -> Gray codes 00,01,11); Gray code 10 -> invGray(2) == 3 >= paletteLen (CBIT T6!)
+        byte[] outOfRangeGray = new byte[] {
+            2, // payloadByteLen = 2
+            (byte) 0x04, // plane 0 = Const0 (00), plane 1 = subHdr (01) -> 0b00_00_01_00 = 0x04
+            (byte) 0xFF  // plane 1 = All-1 -> every voxel has g = 0b10 -> invGray = 3 >= 3!
+        };
+        assertThrows(CorruptRegionEntryException.class, () -> LcaV3Codec.decodeGrayBitplaneBlocks(
+                outOfRangeGray, 0, outOfRangeGray.length, 3, LcaSectionCodec.CURVE_YZX, -1L, new long[256], 4));
+    }
+
+    @Test
+    @DisplayName("Standalone 1_21_R1 expanded 64-chunk fallback satisfies v3-Default Mode B size gate")
+    void standaloneFallback64ChunkFixtureBeatsMcaSize() throws Exception {
+        byte[] sourceMca = loadFixture("/anvil/real/1_21_R1/r.0.0.mca");
+        AnvilReader.ChunkEntry origin = AnvilReader.readChunkEntry(sourceMca, 0, 0);
+        assertNotNull(origin);
+        List<int[]> coords = new ArrayList<>();
+        List<LinkedHashMap<String, Object>> roots = new ArrayList<>();
+        coords.add(new int[] {0, 0});
+        roots.add(origin.root);
+        expandSingleChunkFixture(coords, roots, 64);
+        assertEquals(64, coords.size());
+
+        List<byte[]> rawNbtList = new ArrayList<>(64);
+        for (LinkedHashMap<String, Object> root : roots) {
+            rawNbtList.add(Nbt.writeNamedRoot("", root));
+        }
+        int dataVersion = AnvilReader.getDataVersion(roots.get(0));
+        byte[] benchMca = buildMcaFromRawNbt(coords, rawNbtList);
+        LcaRegionWriter.LcaLiveArchive v3DefBArch = createPopulatedArchive(
+                coords, roots, dataVersion, 1, LcaRegionReader.LCA_FORMAT_VERSION_V3, LcaV3Codec.DEFAULT_V3_FEATURES);
+        byte[] v3DefBBytes = v3DefBArch.toByteArray();
+
+        assertTrue(
+                v3DefBBytes.length < benchMca.length,
+                "Standalone 64-chunk fallback v3-Default Mode B (" + v3DefBBytes.length
+                        + " B) must be smaller than vanilla .mca (" + benchMca.length + " B)");
+    }
+
+    private static final String[] FALLBACK_TERRAIN_STATES = {
+        "minecraft:air",
+        "minecraft:deepslate",
+        "minecraft:stone",
+        "minecraft:tuff",
+        "minecraft:granite",
+        "minecraft:diorite",
+        "minecraft:andesite",
+        "minecraft:gravel",
+        "minecraft:dirt",
+        "minecraft:grass_block",
+        "minecraft:coal_ore",
+        "minecraft:iron_ore",
+        "minecraft:copper_ore",
+        "minecraft:gold_ore",
+        "minecraft:redstone_ore",
+        "minecraft:lapis_ore",
+        "minecraft:cobblestone"
+    };
+
+    /**
+     * Deterministically expands a single-chunk template into {@code targetCount} distinct terrain
+     * chunks (up to 1,024) so standalone SDK exports without the 8.6 MiB Overworld fixture exercise
+     * realistic multi-chunk regions.
+     */
+    static void expandSingleChunkFixture(
+            List<int[]> coords, List<LinkedHashMap<String, Object>> chunkRoots, int targetCount) {
+        if (chunkRoots.isEmpty()) {
+            throw new IllegalArgumentException("Template chunk list must not be empty");
+        }
+        int count = Math.min(1024, Math.max(1, targetCount));
+        int gridWidth = count <= 64 ? 8 : 32;
+        LinkedHashMap<String, Object> template = chunkRoots.get(0);
+        coords.clear();
+        chunkRoots.clear();
+
+        for (int idx = 0; idx < count; idx++) {
+            int rx = idx % gridWidth;
+            int rz = idx / gridWidth;
+            LinkedHashMap<String, Object> copy = new LinkedHashMap<>(template);
+            copy.put("xPos", rx);
+            copy.put("zPos", rz);
+            copy.put("LastUpdate", 1700000000L + idx * 37L);
+            copy.put("InhabitedTime", 120L + idx * 19L);
+
+            Object hmObj = template.get("Heightmaps");
+            if (hmObj instanceof Map<?, ?> hmMap) {
+                LinkedHashMap<String, Object> newHm = new LinkedHashMap<>();
+                int keyIdx = 0;
+                for (Map.Entry<?, ?> entry : hmMap.entrySet()) {
+                    String k = String.valueOf(entry.getKey());
+                    Object v = entry.getValue();
+                    if (v instanceof long[] arr) {
+                        long[] modArr = new long[arr.length];
+                        for (int w = 0; w < arr.length; w++) {
+                            long noise = mix64(
+                                    (idx + 1L) * 0x9E3779B97F4A7C15L ^ (keyIdx * 64L + w) * 0xBF58476D1CE4E5B9L);
+                            modArr[w] = arr[w] ^ (noise & 0x001F_0F87_C3E1_F078L);
+                        }
+                        newHm.put(k, modArr);
+                    } else {
+                        newHm.put(k, v);
+                    }
+                    keyIdx++;
+                }
+                copy.put("Heightmaps", newHm);
+            }
+
+            Object secsObj = template.get("sections");
+            if (secsObj instanceof Nbt.NbtList origSecs) {
+                List<Object> newSecItems = new ArrayList<>(origSecs.items.size());
+                for (int s = 0; s < origSecs.items.size(); s++) {
+                    Object item = origSecs.items.get(s);
+                    if (!(item instanceof Map<?, ?> secMap)) {
+                        newSecItems.add(item);
+                        continue;
+                    }
+                    LinkedHashMap<String, Object> secCopy = new LinkedHashMap<>();
+                    for (Map.Entry<?, ?> e : secMap.entrySet()) {
+                        secCopy.put(String.valueOf(e.getKey()), e.getValue());
+                    }
+                    int secY = secCopy.get("Y") instanceof Number n ? n.intValue() : (s - 4);
+                    if (secY >= -4 && secY <= 11) {
+                        secCopy.put("block_states", buildSynthesizedTerrainBlockStates(idx, secY));
+                        byte[] sky = new byte[2048];
+                        if (secY >= 4) {
+                            Arrays.fill(sky, (byte) 0xFF);
+                        }
+                        secCopy.put("SkyLight", sky);
+                        secCopy.remove("BlockLight");
+                    }
+                    newSecItems.add(secCopy);
+                }
+                copy.put("sections", new Nbt.NbtList(Nbt.TAG_COMPOUND, newSecItems));
+            }
+
+            coords.add(new int[] {rx, rz});
+            chunkRoots.add(copy);
+        }
+    }
+
+    private static LinkedHashMap<String, Object> buildSynthesizedTerrainBlockStates(int chunkIdx, int secY) {
+        int palSize = FALLBACK_TERRAIN_STATES.length;
+        int[] order = new int[palSize];
+        for (int i = 0; i < palSize; i++) {
+            order[i] = i;
+        }
+        long seed = mix64((chunkIdx + 1L) * 0x9E3779B97F4A7C15L ^ (secY + 16L) * 0xBF58476D1CE4E5B9L);
+        for (int i = palSize - 1; i > 0; i--) {
+            seed = mix64(seed + i);
+            int j = (int) Long.remainderUnsigned(seed, i + 1);
+            int tmp = order[i];
+            order[i] = order[j];
+            order[j] = tmp;
+        }
+        String dominantName = secY < 0 ? "minecraft:deepslate" : "minecraft:stone";
+        int domLocalIdx = 0;
+        for (int i = 0; i < palSize; i++) {
+            if (FALLBACK_TERRAIN_STATES[order[i]].equals(dominantName)) {
+                domLocalIdx = i;
+                break;
+            }
+        }
+        if (domLocalIdx == 0) {
+            int swapWith = 1 + (Math.abs(chunkIdx * 5 + secY * 3) % (palSize - 1));
+            int tmp = order[0];
+            order[0] = order[swapWith];
+            order[swapWith] = tmp;
+            domLocalIdx = swapWith;
+        }
+
+        List<Object> paletteList = new ArrayList<>(palSize);
+        for (int i = 0; i < palSize; i++) {
+            LinkedHashMap<String, Object> entry = new LinkedHashMap<>();
+            entry.put("Name", FALLBACK_TERRAIN_STATES[order[i]]);
+            paletteList.add(entry);
+        }
+
+        int[] voxels = new int[4096];
+        Arrays.fill(voxels, domLocalIdx);
+        int cursor = (int) Long.remainderUnsigned(seed, 97) + 16;
+        for (int round = 0; round < 2; round++) {
+            for (int p = 0; p < palSize; p++) {
+                if (p == domLocalIdx) {
+                    continue;
+                }
+                seed = mix64(seed + p * 31L + round * 131L);
+                int gap = 36 + (int) Long.remainderUnsigned(seed, 72);
+                int runLen = 10 + (int) Long.remainderUnsigned(seed >>> 16, 7);
+                cursor += gap;
+                if (cursor + runLen >= 4096) {
+                    cursor = (cursor + runLen) & 4095;
+                }
+                if (cursor + runLen <= 4096) {
+                    Arrays.fill(voxels, cursor, cursor + runLen, p);
+                    cursor += runLen;
+                }
+            }
+        }
+
+        long[] packed = new long[342];
+        int vIdx = 0;
+        for (int w = 0; w < packed.length && vIdx < 4096; w++) {
+            long word = 0L;
+            for (int slot = 0; slot < 12 && vIdx < 4096; slot++, vIdx++) {
+                word |= ((long) (voxels[vIdx] & 0x1F)) << (slot * 5);
+            }
+            packed[w] = word;
+        }
+
+        LinkedHashMap<String, Object> bs = new LinkedHashMap<>();
+        bs.put("palette", new Nbt.NbtList(Nbt.TAG_COMPOUND, paletteList));
+        bs.put("data", packed);
+        return bs;
+    }
+
+    private static long mix64(long z) {
+        z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;
+        z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;
+        return z ^ (z >>> 31);
     }
 }

@@ -251,10 +251,12 @@ public final class BytecodeCausalGraphScanner {
         CAUSAL_HOLLOW_COMMAND,
         /** Order 2: Shared mutable class field is accessed across methods/threads with mismatched locks or unsynchronized collection mutations ({@code CAUSAL-RACE}). */
         CAUSAL_SHARED_STATE_RACE,
-        /** Order 2: Synchronous command or non-async event handler reaches blocking chunk/disk/JDBC/Future.get I/O within k<=4 hops ({@code CAUSAL-MAIN-IO}, {@code S-005}). */
+        /** Order 2: Synchronous command or non-async event handler reaches blocking chunk/disk/JDBC/Future.get I/O within {@code k <= 4} hops ({@code CAUSAL-MAIN-IO}, {@code S-005}). */
         CAUSAL_SYNC_MAIN_THREAD_IO,
         /** Order 2: Intra-method Closeable/stream/ChunkTicket allocation lacks close()/release()/MemoryTracker across exit paths ({@code CAUSAL-LEAK}, {@code S-002}). */
         CAUSAL_UNCLOSED_RESOURCE_LEAK,
+        /** Order 2: Command/event handler or unclosed lifecycle init spawns raw Thread, Timer, or Executors pool bypassing the server scheduler ({@code F-001}, {@code S-002}). */
+        CAUSAL_UNMANAGED_THREAD_SPAWN,
         /** Order 2 (Advisory): Subscribed LLM semantic/guard-polarity mismatch grounded in closed-world AST symbols. */
         CAUSAL_LLM_SEMANTIC_MISMATCH
     }
@@ -2082,6 +2084,20 @@ public final class BytecodeCausalGraphScanner {
                         listenerRegistrations
                 );
         findings.addAll(leakFindings);
+        findingSeq += leakFindings.size();
+
+        List<CausalFinding> unmanagedThreadFindings =
+                BytecodeParityAnalyzers.detectUnmanagedThreadSpawns(
+                        effName,
+                        findingSeq,
+                        classesByName,
+                        methodsBySymbol,
+                        methodsByName,
+                        allAsyncSpawnedLambdas,
+                        listenerRegistrations
+                );
+        findings.addAll(unmanagedThreadFindings);
+        findingSeq += unmanagedThreadFindings.size();
 
         List<CausalChainSlice> enrichedChains =
                 BytecodeParityAnalyzers.enrichSlicesWithHoareFramesAndProofs(

@@ -1316,11 +1316,166 @@ public class LeafAnvilInterceptorAndConverterTest {
 
                 net.leaf.anvil.agent.LeafAnvilSectionClassTransformer xform =
                         new net.leaf.anvil.agent.LeafAnvilSectionClassTransformer();
-                assertNull(xform.transform(null, "java/lang/String", null, null, new byte[]{1, 2, 3}));
+                assertNull(xform.transform(null, null, null, null, new byte[]{1, 2, 3}));
                 assertNull(xform.transform(null, null, null, null, new byte[]{1, 2, 3}));
             } finally {
                 coord.shutdownCompactionPool();
             }
         }
+    }
+
+    @Test
+    @DisplayName("anvil-api-ADR-006: LeafAnvilWorldConverter atomically upgrades 0x0002 -> 0x0003 and LcaWireStreamProtocol gates CAP_LCA_V3_SECTIONS")
+    void worldConverterUpgradesLegacyV2ToV3AndWireProtocolGatesCapLcaV3Sections(@TempDir Path tempDir) throws Exception {
+        // 1. Atomic 0x0002 -> 0x0003 upgrade via convertWorldToLca & healAndVerifyWorld
+        Path dimDir = tempDir.resolve("v2_upgrade_dim");
+        Path regionDir = dimDir.resolve("region");
+        Files.createDirectories(regionDir);
+
+        Path v2Region0 = regionDir.resolve("r.0.0.lca");
+        java.lang.reflect.Method createV2 = LcaRegionWriter.class.getDeclaredMethod(
+                "createEmptyLiveArchiveWithVersion",
+                int.class, int.class, int.class, int.class, int.class, int.class, int.class, int.class, int.class);
+        createV2.setAccessible(true);
+        LcaRegionWriter.LcaLiveArchive v2Arch = (LcaRegionWriter.LcaLiveArchive) createV2.invoke(
+                null, 0, 0, -4, 24, 4671, 0, LcaRegionReader.STORAGE_KIND_REGION_VOXEL,
+                LcaRegionWriter.DEFAULT_ROOT_DICT_CAPACITY_BYTES, LcaRegionReader.LCA_FORMAT_VERSION_V2);
+        v2Arch.saveChunkCoW(1, 2, buildVoxelChunk(1, 2, "minecraft:deepslate"));
+        Files.write(v2Region0, v2Arch.toByteArray());
+        assertEquals(LcaRegionReader.LCA_FORMAT_VERSION_V2, LcaRegionWriter.peekFormatVersion(v2Region0));
+
+        LeafAnvilWorldConverter.OperationReport convReport =
+                LeafAnvilWorldConverter.convertWorldToLca(dimDir, 1, true);
+        assertEquals(1, convReport.filesConvertedOrModified(), "Legacy 0x0002 region must be upgraded by convertWorldToLca");
+        assertEquals(LcaRegionReader.LCA_FORMAT_VERSION_V3, LcaRegionWriter.peekFormatVersion(v2Region0));
+        assertTrue(Files.exists(regionDir.resolve("r.0.0.lca.v2.bak")));
+        io.github.dailystruggle.anvil.AnvilChunkView convView = LcaRegionReader.readChunkViewFromFile(v2Region0, 1, 2);
+        assertNotNull(convView);
+        assertEquals("minecraft:deepslate", convView.blockIdAt(0, 0, 0));
+
+        // Second legacy 0x0002 region upgraded via healAndVerifyWorld
+        Path v2Region1 = regionDir.resolve("r.1.0.lca");
+        LcaRegionWriter.LcaLiveArchive v2Arch1 = (LcaRegionWriter.LcaLiveArchive) createV2.invoke(
+                null, 1, 0, -4, 24, 4671, 0, LcaRegionReader.STORAGE_KIND_REGION_VOXEL,
+                LcaRegionWriter.DEFAULT_ROOT_DICT_CAPACITY_BYTES, LcaRegionReader.LCA_FORMAT_VERSION_V2);
+        v2Arch1.saveChunkCoW(3, 4, buildVoxelChunk(35, 4, "minecraft:granite"));
+        Files.write(v2Region1, v2Arch1.toByteArray());
+        assertEquals(LcaRegionReader.LCA_FORMAT_VERSION_V2, LcaRegionWriter.peekFormatVersion(v2Region1));
+
+        LeafAnvilWorldConverter.OperationReport healReport = LeafAnvilWorldConverter.healAndVerifyWorld(dimDir);
+        assertTrue(healReport.filesConvertedOrModified() >= 1);
+        assertEquals(LcaRegionReader.LCA_FORMAT_VERSION_V3, LcaRegionWriter.peekFormatVersion(v2Region1));
+        io.github.dailystruggle.anvil.AnvilChunkView healView = LcaRegionReader.readChunkViewFromFile(v2Region1, 3, 4);
+        assertNotNull(healView);
+        assertEquals("minecraft:granite", healView.blockIdAt(0, 0, 0));
+
+        // 2. CAP_LCA_V3_SECTIONS negotiation and automatic v2 downgrade for legacy clients
+        long regHash = 0x123456789ABCDEF0L;
+        net.leaf.anvil.common.net.LcaWireStreamProtocol.NegotiatedSession v3Session =
+                net.leaf.anvil.common.net.LcaWireStreamProtocol.negotiate(
+                        new net.leaf.anvil.common.net.LcaWireStreamProtocol.HandshakePayload(
+                                net.leaf.anvil.common.net.LcaWireStreamProtocol.PROTOCOL_VERSION,
+                                net.leaf.anvil.common.net.LcaWireStreamProtocol.ALL_CAPABILITIES,
+                                32 * 1024, regHash),
+                        net.leaf.anvil.common.net.LcaWireStreamProtocol.ALL_CAPABILITIES,
+                        regHash);
+        assertTrue(v3Session.isV3SectionsEnabled());
+
+        int legacyCaps = net.leaf.anvil.common.net.LcaWireStreamProtocol.ALL_CAPABILITIES
+                & ~net.leaf.anvil.common.net.LcaWireStreamProtocol.CAP_LCA_V3_SECTIONS;
+        net.leaf.anvil.common.net.LcaWireStreamProtocol.NegotiatedSession legacySession =
+                net.leaf.anvil.common.net.LcaWireStreamProtocol.negotiate(
+                        new net.leaf.anvil.common.net.LcaWireStreamProtocol.HandshakePayload(
+                                net.leaf.anvil.common.net.LcaWireStreamProtocol.PROTOCOL_VERSION,
+                                legacyCaps, 32 * 1024, regHash),
+                        net.leaf.anvil.common.net.LcaWireStreamProtocol.ALL_CAPABILITIES,
+                        regHash);
+        assertFalse(legacySession.isV3SectionsEnabled());
+
+        // Construct a real SEC_EXT_GRAY_BITPLANES (0x02) section slice via RawChunkFrameSnapshot
+        LinkedHashMap<String, Object> stratifiedChunk = new LinkedHashMap<>();
+        stratifiedChunk.put("DataVersion", 4671);
+        stratifiedChunk.put("xPos", 0);
+        stratifiedChunk.put("zPos", 0);
+        stratifiedChunk.put("yPos", -4);
+        stratifiedChunk.put("Status", "minecraft:full");
+        List<Object> pal = new ArrayList<>();
+        Map<String, Integer> rtMap = new LinkedHashMap<>();
+        rtMap.put("minecraft:air", 10);
+        for (int i = 0; i < 16; i++) {
+            String nm = "wiremod:band_" + i;
+            LinkedHashMap<String, Object> pe = new LinkedHashMap<>();
+            pe.put("Name", nm);
+            pal.add(pe);
+            rtMap.put(nm, 100 + i);
+        }
+        long[] packed = new long[256];
+        for (int y = 0; y < 16; y++) {
+            for (int z = 0; z < 16; z++) {
+                for (int x = 0; x < 16; x++) {
+                    int yzx = (y << 8) | (z << 4) | x;
+                    int s = (y < 4) ? 0 : (((y - 4) + ((x + z) >>> 3)) % 16);
+                    packed[yzx / 16] |= ((long) s) << ((yzx % 16) * 4);
+                }
+            }
+        }
+        LinkedHashMap<String, Object> sec = new LinkedHashMap<>();
+        sec.put("Y", (byte) 0);
+        LinkedHashMap<String, Object> bs = new LinkedHashMap<>();
+        bs.put("palette", new Nbt.NbtList(Nbt.TAG_COMPOUND, pal));
+        bs.put("data", packed);
+        sec.put("block_states", bs);
+        LinkedHashMap<String, Object> biomes = new LinkedHashMap<>();
+        biomes.put("palette", new Nbt.NbtList(Nbt.TAG_STRING, List.of("minecraft:plains")));
+        sec.put("biomes", biomes);
+        stratifiedChunk.put("sections", new Nbt.NbtList(Nbt.TAG_COMPOUND, List.of(sec)));
+
+        // Enable FEATURE_GRAY_BITPLANES via reflection since LcaV3Codec is package-private in :anvil-api
+        Class<?> v3CodecCls = Class.forName("io.github.dailystruggle.anvil.LcaV3Codec");
+        java.lang.reflect.Method setMask = v3CodecCls.getDeclaredMethod("setThreadFeatureMask", int.class);
+        java.lang.reflect.Method resetMask = v3CodecCls.getDeclaredMethod("resetThreadFeatureMask");
+        setMask.setAccessible(true);
+        resetMask.setAccessible(true);
+        java.lang.reflect.Field allFeatField = v3CodecCls.getDeclaredField("ALL_V3_FEATURES");
+        allFeatField.setAccessible(true);
+        int allFeatures = allFeatField.getInt(null);
+        byte[] grayRuntimeSlice;
+        setMask.invoke(null, allFeatures);
+        try {
+            LcaRegionWriter.LcaLiveArchive arch =
+                    LcaRegionWriter.createEmptyLiveArchive(0, 0, -4, 24, 4671, false, 1024);
+            arch.saveChunkCoW(0, 0, stratifiedChunk);
+            io.github.dailystruggle.anvil.RawChunkFrameSnapshot snap = arch.readRawChunkFrame(0, 0, rtMap::get);
+            assertNotNull(snap);
+            grayRuntimeSlice = snap.sliceSectionFrameWithRuntimePalette(4, null);
+        } finally {
+            resetMask.invoke(null);
+        }
+        assertTrue(io.github.dailystruggle.anvil.RawChunkFrameSnapshot.isV3ExtendedSectionFrame(grayRuntimeSlice));
+
+        List<net.leaf.anvil.common.net.LcaWireStreamProtocol.SectionWireSlice> slices = List.of(
+                net.leaf.anvil.common.net.LcaWireStreamProtocol.SectionWireSlice.nonUniform(4, grayRuntimeSlice, new int[0]));
+        net.leaf.anvil.common.net.LcaWireStreamProtocol.EntryFullChunk fullEntry =
+                new net.leaf.anvil.common.net.LcaWireStreamProtocol.EntryFullChunk(0, 0, 1L, 0L, slices, new byte[0]);
+        net.leaf.anvil.common.net.LcaWireStreamProtocol.ClientboundLcaChunkBatchPayload batch =
+                new net.leaf.anvil.common.net.LcaWireStreamProtocol.ClientboundLcaChunkBatchPayload(0, 0, List.of(fullEntry));
+        assertTrue(net.leaf.anvil.common.net.LcaWireStreamProtocol.containsV3ExtendedSection(batch));
+
+        // v3 client receives secExtFlags=0x02 slice zero-copy
+        byte[] v3Wire = net.leaf.anvil.common.net.LcaWireStreamProtocol.encodeChunkBatchPayload(batch, v3Session);
+        net.leaf.anvil.common.net.LcaWireStreamProtocol.ClientboundLcaChunkBatchPayload v3Dec =
+                net.leaf.anvil.common.net.LcaWireStreamProtocol.decodeChunkBatchPayload(v3Wire, v3Session);
+        byte[] v3ReceivedFrame = ((net.leaf.anvil.common.net.LcaWireStreamProtocol.EntryFullChunk) v3Dec.entries().get(0))
+                .sections().get(0).baseFrameSlice();
+        assertTrue(io.github.dailystruggle.anvil.RawChunkFrameSnapshot.isV3ExtendedSectionFrame(v3ReceivedFrame));
+
+        // Legacy client without CAP_LCA_V3_SECTIONS receives downgraded v2-compatible SectionFrame
+        byte[] legacyWire = net.leaf.anvil.common.net.LcaWireStreamProtocol.encodeChunkBatchPayload(batch, legacySession);
+        net.leaf.anvil.common.net.LcaWireStreamProtocol.ClientboundLcaChunkBatchPayload legacyDec =
+                net.leaf.anvil.common.net.LcaWireStreamProtocol.decodeChunkBatchPayload(legacyWire, legacySession);
+        byte[] legacyReceivedFrame = ((net.leaf.anvil.common.net.LcaWireStreamProtocol.EntryFullChunk) legacyDec.entries().get(0))
+                .sections().get(0).baseFrameSlice();
+        assertFalse(io.github.dailystruggle.anvil.RawChunkFrameSnapshot.isV3ExtendedSectionFrame(legacyReceivedFrame),
+                "Clients without CAP_LCA_V3_SECTIONS must never receive secExtFlags=0x02 frames");
     }
 }

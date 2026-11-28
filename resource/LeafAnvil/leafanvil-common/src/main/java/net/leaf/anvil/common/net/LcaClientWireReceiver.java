@@ -113,6 +113,7 @@ public final class LcaClientWireReceiver {
             int advertisedCacheBudgetKiB
     ) {
         this.coordinator = Objects.requireNonNull(coordinator, "coordinator");
+        this.coordinator.setClientMode(true);
         this.advertisedCacheBudgetKiB = Math.max(256, advertisedCacheBudgetKiB);
     }
 

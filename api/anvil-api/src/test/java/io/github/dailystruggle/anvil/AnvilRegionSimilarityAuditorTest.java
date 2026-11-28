@@ -6,6 +6,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -14,6 +15,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.zip.DeflaterOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -98,6 +101,20 @@ class AnvilRegionSimilarityAuditorTest {
         assertEquals(1, sc.refChunksWithStructureReferences());
         assertEquals(1, sc.candChunksWithStructureReferences());
         assertEquals(1, sc.refStructureStartCounts().get("minecraft:village_plains"));
+
+        RegionSimilarityAuditor.MigrationSeamStats ms = sc.migrationSeam();
+        assertEquals(0L, ms.comparedSharedChunkEdges());
+        assertEquals(60L, ms.borderColumnsChecked());
+        assertEquals(100.0, ms.borderSurfaceExactPct(), 1e-6);
+        assertEquals(100.0, ms.borderSurfaceWithin1BlockPct(), 1e-6);
+        assertEquals(0.0, ms.seamSurfaceMaeBlocks(), 1e-6);
+        assertEquals(0, ms.seamMaxInducedCliffBlocks());
+        assertEquals(0L, ms.seamInducedCliffEdges());
+        assertEquals(100.0, ms.borderExactBiomePct(), 1e-6);
+        assertEquals(100.0, ms.borderStrictBlockPct(), 1e-6);
+        assertEquals(100.0, ms.interiorStrictBlockPct(), 1e-6);
+        assertEquals(100.0, ms.borderSubterraneanSolidAirAgreementPct(), 1e-6);
+        assertEquals(0L, ms.borderSubterraneanFluidLeakVoxels());
     }
 
     @Test
@@ -526,7 +543,7 @@ class AnvilRegionSimilarityAuditorTest {
                 () -> RegionSimilarityAuditor.compareDirectories(
                         singleRefFile.getParent(), corruptDir, "ref", "corrupt", 0));
 
-        // Corrupt zlib stream header surfaces RuntimeException per S-004
+        // Corrupt zlib stream header surfaces IOException (ZipException) per S-004
         byte[] corruptZlibMca = singleChunkMca.clone();
         corruptZlibMca[sectorByteOffset + 5] = (byte) 0xFF;
         corruptZlibMca[sectorByteOffset + 6] = (byte) 0xFF;
@@ -534,7 +551,7 @@ class AnvilRegionSimilarityAuditorTest {
         Files.createDirectories(corruptZlibDir);
         Files.write(corruptZlibDir.resolve("r.0.0.mca"), corruptZlibMca);
         assertThrows(
-                RuntimeException.class,
+                IOException.class,
                 () -> RegionSimilarityAuditor.compareDirectories(
                         singleRefFile.getParent(), corruptZlibDir, "ref", "corrupt_zlib", 0));
     }
@@ -666,5 +683,240 @@ class AnvilRegionSimilarityAuditorTest {
             root.put("structures", structures);
         }
         return root;
+    }
+
+    @Test
+    @DisplayName("REQ-RTP-S-005: Axis 5 migration-seam audit isolates interior drift from cross-chunk cliffs, biome seams, and subterranean fluid leaks")
+    void migrationSeamAuditDistinguishesInteriorDriftFromBorderSeams(@TempDir Path tmpDir)
+            throws IOException {
+        // 2x2 grid of adjacent chunks: (0,0), (1,0), (0,1), (1,1) -> 4 shared intra-region edges
+        Map<Integer, LinkedHashMap<String, Object>> refChunks = new LinkedHashMap<>();
+        Map<Integer, LinkedHashMap<String, Object>> interiorDriftChunks = new LinkedHashMap<>();
+        Map<Integer, LinkedHashMap<String, Object>> cliffSeamChunks = new LinkedHashMap<>();
+
+        for (int cz = 0; cz < 2; cz++) {
+            for (int cx = 0; cx < 2; cx++) {
+                int key = (cz << 5) | cx;
+                LinkedHashMap<String, Object> refRoot = buildSyntheticOverworldChunk(
+                        0, false, true, "minecraft:oak_log", "minecraft:cave_air",
+                        "minecraft:plains", false, "minecraft:full");
+                refChunks.put(key, refRoot);
+
+                // Candidate A: interior-only block change (stone -> granite at interior x=5, z=5, y=20);
+                // all chunk borders remain 100% identical to Vanilla.
+                LinkedHashMap<String, Object> interiorOnly = buildSyntheticOverworldChunk(
+                        0, false, true, "minecraft:oak_log", "minecraft:cave_air",
+                        "minecraft:plains", false, "minecraft:full");
+                mutateSingleSectionBlock(interiorOnly, 0, (4 << 8) | (5 << 4) | 5, "minecraft:granite");
+                interiorDriftChunks.put(key, interiorOnly);
+
+                // Candidate B: on chunk (0,0) shift surface +4 blocks (creating a 4-block excess cliff
+                // against Vanilla neighbors (1,0) and (0,1)), change biome to desert, and flood border cave.
+                boolean perturbed = (cx == 0 && cz == 0);
+                LinkedHashMap<String, Object> cliffRoot = buildSyntheticOverworldChunk(
+                        perturbed ? 4 : 0,
+                        perturbed,
+                        true,
+                        "minecraft:oak_log",
+                        "minecraft:cave_air",
+                        perturbed ? "minecraft:desert" : "minecraft:plains",
+                        false,
+                        "minecraft:full");
+                cliffSeamChunks.put(key, cliffRoot);
+            }
+        }
+
+        Path refDir = tmpDir.resolve("ref/region");
+        Path interiorDir = tmpDir.resolve("interior_only/region");
+        Path cliffDir = tmpDir.resolve("cliff_seam/region");
+        Files.createDirectories(refDir);
+        Files.createDirectories(interiorDir);
+        Files.createDirectories(cliffDir);
+
+        Files.write(refDir.resolve("r.0.0.mca"), writeMultiChunkRegion(refChunks));
+        Files.write(interiorDir.resolve("r.0.0.mca"), writeMultiChunkRegion(interiorDriftChunks));
+        Files.write(cliffDir.resolve("r.0.0.mca"), writeMultiChunkRegion(cliffSeamChunks));
+
+        RegionSimilarityAuditor.RegionSimilarityScorecard interiorSc =
+                RegionSimilarityAuditor.compareDirectories(refDir, interiorDir, "vanilla", "interior-drift", 0);
+        RegionSimilarityAuditor.MigrationSeamStats interiorSeam = interiorSc.migrationSeam();
+        assertEquals(4L, interiorSeam.comparedSharedChunkEdges());
+        assertEquals(240L, interiorSeam.borderColumnsChecked());
+        assertEquals(100.0, interiorSeam.borderSurfaceExactPct(), 1e-6);
+        assertEquals(100.0, interiorSeam.borderSurfaceWithin1BlockPct(), 1e-6);
+        assertEquals(0.0, interiorSeam.seamSurfaceMaeBlocks(), 1e-6);
+        assertEquals(0, interiorSeam.seamMaxInducedCliffBlocks());
+        assertEquals(0L, interiorSeam.seamInducedCliffEdges());
+        assertEquals(100.0, interiorSeam.borderExactBiomePct(), 1e-6);
+        assertEquals(100.0, interiorSeam.borderStrictBlockPct(), 1e-6);
+        assertTrue(interiorSeam.interiorStrictBlockPct() < 100.0,
+                "Interior mutation must lower interiorStrictBlockPct while keeping borderStrictBlockPct at 100%");
+        assertEquals(100.0, interiorSeam.borderSubterraneanSolidAirAgreementPct(), 1e-6);
+        assertEquals(0L, interiorSeam.borderSubterraneanFluidLeakVoxels());
+
+        RegionSimilarityAuditor.RegionSimilarityScorecard cliffSc =
+                RegionSimilarityAuditor.compareDirectories(refDir, cliffDir, "vanilla", "cliff-seam", 0);
+        RegionSimilarityAuditor.MigrationSeamStats cliffSeam = cliffSc.migrationSeam();
+        assertEquals(4L, cliffSeam.comparedSharedChunkEdges());
+        assertEquals(75.0, cliffSeam.borderSurfaceExactPct(), 1e-6);
+        assertEquals(75.0, cliffSeam.borderSurfaceWithin1BlockPct(), 1e-6);
+        assertEquals(4, cliffSeam.seamMaxInducedCliffBlocks());
+        // 16 E-W edges ((0,0)->(1,0)) + 15 N-S edges ((0,0)->(0,1), lx=1..15);
+        // at lx=0, (0,1) has a 3-block oak tree canopy at (0,0) so dRef=3 and dC2V=1.
+        assertEquals(31L, cliffSeam.seamInducedCliffEdges());
+        assertEquals(75.0, cliffSeam.borderExactBiomePct(), 1e-6);
+        assertTrue(cliffSeam.borderSubterraneanFluidLeakVoxels() >= 16L,
+                "Flooding upper cave along z=0 border of chunk (0,0) must report >= 16 fluid-to-air seam leaks");
+
+        String json = RegionSimilarityAuditor.toJson(cliffSc);
+        assertTrue(json.contains("\"migration_seam\""));
+        assertTrue(json.contains("\"seam_max_induced_cliff_blocks\": 4"));
+        assertTrue(json.contains("\"border_subterranean_fluid_leak_voxels\":"));
+
+        String md = RegionSimilarityAuditor.toMarkdown(cliffSc);
+        assertTrue(md.contains("Axis 5: Migration Seam Continuity"));
+        assertTrue(md.contains("fluid-to-air seam leaks"));
+    }
+
+    @Test
+    @DisplayName("REQ-RTP-S-005: MC 26.4 16x16x16 per-block biome differences off 4x4x4 quartet corners are detected")
+    void auditorDetectsNonCorner26_4PerBlockBiomeDiffs(@TempDir Path tmpDir) throws IOException {
+        int[] refBiomes = new int[4096];
+        int[] candBiomes = new int[4096];
+        // Identical at all 64 4x4x4 quartet corners (including (0,0,0) = desert so both use 16x16x16 storage)
+        refBiomes[BiomePaletteSection.biomeVoxelIndex(0, 0, 0)] = 1;
+        candBiomes[BiomePaletteSection.biomeVoxelIndex(0, 0, 0)] = 1;
+        // Differ only at non-corner voxels: interior (1,0,1) and chunk border (0,0,1)
+        candBiomes[BiomePaletteSection.biomeVoxelIndex(1, 0, 1)] = 1;
+        candBiomes[BiomePaletteSection.biomeVoxelIndex(0, 0, 1)] = 1;
+
+        long[] refPacked = packBiome4096(refBiomes, 2);
+        long[] candPacked = packBiome4096(candBiomes, 2);
+        List<String> biomePal = List.of("minecraft:plains", "minecraft:desert");
+
+        LinkedHashMap<String, Object> refRoot = buildMc264SingleSectionChunk(biomePal, refPacked);
+        LinkedHashMap<String, Object> candRoot = buildMc264SingleSectionChunk(biomePal, candPacked);
+
+        Path refDir = tmpDir.resolve("ref264/region");
+        Path candDir = tmpDir.resolve("cand264/region");
+        Files.createDirectories(refDir);
+        Files.createDirectories(candDir);
+        Files.write(refDir.resolve("r.0.0.mca"), AnvilTestFixtures.writeSingleChunkRegion(refRoot));
+        Files.write(candDir.resolve("r.0.0.mca"), AnvilTestFixtures.writeSingleChunkRegion(candRoot));
+
+        RegionSimilarityAuditor.RegionSimilarityScorecard selfSc =
+                RegionSimilarityAuditor.compareDirectories(refDir, refDir, "ref", "self", 0);
+        assertEquals(100.0, selfSc.exactBiomeQuartetMatchPct(), 1e-6);
+        assertEquals(100.0, selfSc.climateClassQuartetMatchPct(), 1e-6);
+        assertEquals(100.0, selfSc.migrationSeam().borderExactBiomePct(), 1e-6);
+
+        RegionSimilarityAuditor.RegionSimilarityScorecard diffSc =
+                RegionSimilarityAuditor.compareDirectories(refDir, candDir, "ref", "cand", 0);
+        assertEquals(1, diffSc.comparedFullChunks());
+        assertTrue(diffSc.exactBiomeQuartetMatchPct() < 100.0,
+                "Non-corner 16x16x16 biome difference must lower exactBiomeQuartetMatchPct");
+        assertTrue(diffSc.climateClassQuartetMatchPct() < 100.0,
+                "Non-corner 16x16x16 biome climate difference must lower climateClassQuartetMatchPct");
+        assertTrue(diffSc.migrationSeam().borderExactBiomePct() < 100.0,
+                "Non-corner border 16x16x16 biome difference at (0,0,1) must lower borderExactBiomePct");
+    }
+
+    private static LinkedHashMap<String, Object> buildMc264SingleSectionChunk(
+            List<String> biomePalette, long[] packedBiomeData) throws IOException {
+        LinkedHashMap<String, Object> sec = AnvilTestFixtures.sectionWithBiomes(
+                (byte) 0,
+                List.of("minecraft:stone"),
+                null,
+                biomePalette,
+                packedBiomeData);
+        LinkedHashMap<String, Object> root =
+                AnvilTestFixtures.chunkRoot(DataVersionSupport.MC_26_4_DATA_VERSION, new long[37], List.of(sec));
+        root.put("yPos", 0);
+        root.remove("Status");
+        root.put("status", "minecraft:full");
+        return root;
+    }
+
+    private static long[] packBiome4096(int[] cells4096, int paletteSize) {
+        int bits = BiomePaletteSection.biomeBitsPerEntry(paletteSize);
+        int perLong = 64 / bits;
+        int numLongs = BiomePaletteSection.requiredLongs(paletteSize, BiomePaletteSection.CELL_COUNT_16X16X16);
+        long mask = (1L << bits) - 1L;
+        long[] words = new long[numLongs];
+        for (int i = 0; i < BiomePaletteSection.CELL_COUNT_16X16X16; i++) {
+            words[i / perLong] |= (cells4096[i] & mask) << ((i % perLong) * bits);
+        }
+        return words;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void mutateSingleSectionBlock(
+            LinkedHashMap<String, Object> root, int targetSectionY, int voxelIndex, String newBlockId) {
+        Object rawSections = root.get("sections");
+        List<?> sections = (rawSections instanceof Nbt.NbtList nbtList)
+                ? nbtList.items
+                : (List<?>) rawSections;
+        for (Object item : sections) {
+            LinkedHashMap<String, Object> sec = (LinkedHashMap<String, Object>) item;
+            if (((Number) sec.get("Y")).intValue() == targetSectionY) {
+                int[] indices = new int[4096];
+                Arrays.fill(indices, 0);
+                indices[voxelIndex] = 1;
+                List<String> pal = List.of("minecraft:stone", newBlockId);
+                LinkedHashMap<String, Object> blockStates = new LinkedHashMap<>();
+                List<Object> palEntries = new ArrayList<>();
+                for (String name : pal) {
+                    LinkedHashMap<String, Object> entry = new LinkedHashMap<>();
+                    entry.put("Name", name);
+                    palEntries.add(entry);
+                }
+                blockStates.put("palette", new Nbt.NbtList(Nbt.TAG_COMPOUND, palEntries));
+                blockStates.put("data", AnvilTestFixtures.packIndices(4, indices));
+                sec.put("block_states", blockStates);
+                return;
+            }
+        }
+        throw new IllegalStateException("Section Y=" + targetSectionY + " not found");
+    }
+
+    private static byte[] writeMultiChunkRegion(Map<Integer, LinkedHashMap<String, Object>> chunksByKey)
+            throws IOException {
+        byte[] header = new byte[8192];
+        ByteArrayOutputStream sectors = new ByteArrayOutputStream();
+        int nextSector = 2;
+        for (Map.Entry<Integer, LinkedHashMap<String, Object>> e : chunksByKey.entrySet()) {
+            int key = e.getKey();
+            int localX = key & 31;
+            int localZ = (key >>> 5) & 31;
+            byte[] nbt = Nbt.writeNamedRoot("", e.getValue());
+            ByteArrayOutputStream compressed = new ByteArrayOutputStream();
+            try (DeflaterOutputStream dos = new DeflaterOutputStream(compressed)) {
+                dos.write(nbt);
+            }
+            byte[] payload = compressed.toByteArray();
+            int totalBytes = 4 + 1 + payload.length;
+            int sectorCount = (totalBytes + 4095) / 4096;
+            byte[] chunkBuf = new byte[sectorCount * 4096];
+            int lenField = payload.length + 1;
+            chunkBuf[0] = (byte) ((lenField >>> 24) & 0xFF);
+            chunkBuf[1] = (byte) ((lenField >>> 16) & 0xFF);
+            chunkBuf[2] = (byte) ((lenField >>> 8) & 0xFF);
+            chunkBuf[3] = (byte) (lenField & 0xFF);
+            chunkBuf[4] = 2; // zlib
+            System.arraycopy(payload, 0, chunkBuf, 5, payload.length);
+            sectors.write(chunkBuf);
+
+            int hdrOff = 4 * ((localX & 31) + ((localZ & 31) * 32));
+            header[hdrOff] = (byte) ((nextSector >>> 16) & 0xFF);
+            header[hdrOff + 1] = (byte) ((nextSector >>> 8) & 0xFF);
+            header[hdrOff + 2] = (byte) (nextSector & 0xFF);
+            header[hdrOff + 3] = (byte) (sectorCount & 0xFF);
+            nextSector += sectorCount;
+        }
+        byte[] body = sectors.toByteArray();
+        byte[] out = new byte[8192 + body.length];
+        System.arraycopy(header, 0, out, 0, 8192);
+        System.arraycopy(body, 0, out, 8192, body.length);
+        return out;
     }
 }

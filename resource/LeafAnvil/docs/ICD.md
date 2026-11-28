@@ -1,6 +1,6 @@
 # `.lca` (LeafCraft Anvil) Binary Format Interface Control Document (ICD) — Router
 
-> **Single Source of Truth:** The canonical, normative `.lca` Binary Format Interface Control Document (`LCA-ICD-1.0`, MIT License) is maintained exclusively in **[`api/anvil-api/docs/ICD.md`](../../../api/anvil-api/docs/ICD.md)**.
+> **Single Source of Truth:** The canonical, normative `.lca` Binary Format Interface Control Document (`LCA-ICD-3.0`, MIT License) is maintained exclusively in **[`api/anvil-api/docs/ICD.md`](../../../api/anvil-api/docs/ICD.md)**.
 >
 > Do not duplicate byte tables, bitfield definitions, or static lookup tables in this file. During builds, `:resource:LeafAnvil:leafanvil-common` (`processResources`) packages [`api/anvil-api/docs/ICD.md`](../../../api/anvil-api/docs/ICD.md) directly into `LeafAnvil-<version>.jar` at both `docs/ICD.md` and `META-INF/leafanvil/ICD.md`, and `LeafAnvilConfig` extracts that canonical specification to `<config-dir>/ICD.md` on server startup.
 
@@ -17,16 +17,17 @@
 | **Section 5** | Layer 2: Chained Region Shared Dictionary (`0x2040`, `nextSegmentLinkTrailer`, `dictPatternArena` `384 B` Canonical Huffman + Cross-Chunk LZ Arena & Downward-Growing `SEC-DED`) | [`api/anvil-api/docs/ICD.md#5-layer-2-chained-region-shared-dictionary-0x2040`](../../../api/anvil-api/docs/ICD.md#5-layer-2-chained-region-shared-dictionary-0x2040) |
 | **Section 6** | Layer 3: Self-Describing `ChunkFrame` Header, Mode B (`codec1 = 1`) Header `SEC-DED` + `LCD2` (`0x4C44`) 3-Stream Wire Spec & Reference Decoder, Order-Independent `sectionOffsets[i]` & Slab-Local Micro-Palette (`Part A` + `Part B`) | [`api/anvil-api/docs/ICD.md#6-layer-3-self-describing-chunkframe-header-mode-b-wrapper--section-directory`](../../../api/anvil-api/docs/ICD.md#6-layer-3-self-describing-chunkframe-header-mode-b-wrapper--section-directory) |
 | **Section 7** | Layer 4: $16 \times 16 \times 16$ Non-Uniform `SectionFrame` Layout (`YZX`/`H_3`/`Y+H_2`/`XZY` Curves, Delta-Roaring, Flat Bit-Pack & Gray-Code Light Bitplanes) | [`api/anvil-api/docs/ICD.md#7-layer-4-16-times-16-times-16-non-uniform-sectionframe-layout`](../../../api/anvil-api/docs/ICD.md#7-layer-4-16-times-16-times-16-non-uniform-sectionframe-layout) |
-| **Section 8** | Layer 3c: Residual Tail (`MOTION_BLOCKING_NO_LEAVES`, `boilerplateFlags16` Bits `0..14`, and `ChunkPatchTail` `HAS_CHUNK_PATCH_TAIL = 0x4000`) | [`api/anvil-api/docs/ICD.md#8-layer-3c-residual-tail-motion_blocking_no_leaves--boilerplateflags16`](../../../api/anvil-api/docs/ICD.md#8-layer-3c-residual-tail-motion_blocking_no_leaves--boilerplateflags16) |
-| **Section 9** | Static Core Lookup Tables (`STATIC_CORE_STATES` `160`, `STATIC_CORE_BIOMES` `65`, `STATIC_CORE_PROP_SUFFIXES` `128`) | [`api/anvil-api/docs/ICD.md#9-static-core-lookup-tables-static_core_`](../../../api/anvil-api/docs/ICD.md#9-static-core-lookup-tables-static_core_) |
-| **Section 10** | Reader & 4-Tier Bit-Rot Recovery Procedures (`healRegionBitRot`) | [`api/anvil-api/docs/ICD.md#10-reader--recovery-procedures`](../../../api/anvil-api/docs/ICD.md#10-reader--recovery-procedures) |
+| **Section 8** | Layer 3c: Residual Tail (`MOTION_BLOCKING_NO_LEAVES`, `boilerplateFlags16` Bits `0..15`, and `ChunkPatchTail` `HAS_CHUNK_PATCH_TAIL = 0x4000`) | [`api/anvil-api/docs/ICD.md#8-layer-3c-residual-tail-motion_blocking_no_leaves--boilerplateflags16`](../../../api/anvil-api/docs/ICD.md#8-layer-3c-residual-tail-motion_blocking_no_leaves--boilerplateflags16) |
+| **Section 9** | Legacy `0x0002` Static Core Lookup Tables (`STATIC_CORE_*`, quarantined in `LcaV2LegacyCodec`; retired in `0x0003`) | [`api/anvil-api/docs/ICD.md#9-legacy-0x0002-static-core-lookup-tables-static_core_`](../../../api/anvil-api/docs/ICD.md#9-legacy-0x0002-static-core-lookup-tables-static_core_) |
+| **Section 10** | Reader, 4-Tier Bit-Rot Recovery (`healRegionBitRot`) & Atomic `0x0002 -> 0x0003` Upgrade Procedures | [`api/anvil-api/docs/ICD.md#10-reader--recovery-procedures`](../../../api/anvil-api/docs/ICD.md#10-reader--recovery-procedures) |
+| **Section 11** | Format Version `0x0003` (`LCA-ICD-3.0`) Extensions: Factored Layer 2, Pure-ID Palettes, `SEC_EXT_RANK_EXCLUDED (0x01)`, `SEC_EXT_GRAY_BITPLANES (0x02)`, Eikonal Light & O(1) `extFlags` Sub-Streams (`block_ticks`, `fluid_ticks`, `block_entities`, Sparse `PostProcessing`, Dictionary `structures`) | [`api/anvil-api/docs/ICD.md#11-format-version-0x0003-lca-icd-30-normative-extensions`](../../../api/anvil-api/docs/ICD.md#11-format-version-0x0003-lca-icd-30-normative-extensions) |
 
 ---
 
 ## Related Governance & Implementation Sources
 
-- **Canonical Binary Specification (`LCA-ICD-1.0`):** [`api/anvil-api/docs/ICD.md`](../../../api/anvil-api/docs/ICD.md)
-- **Format Architecture & Rationale:** [`anvil-api-ADR-003`](../../../api/anvil-api/docs/adr/anvil-api-ADR-003-hilbert-roaring-gray-chunk-archive.md)
+- **Canonical Binary Specification (`LCA-ICD-3.0`):** [`api/anvil-api/docs/ICD.md`](../../../api/anvil-api/docs/ICD.md)
+- **Format Architecture & Rationale:** [`anvil-api-ADR-003`](../../../api/anvil-api/docs/adr/anvil-api-ADR-003-hilbert-roaring-gray-chunk-archive.md), [`anvil-api-ADR-004`](../../../api/anvil-api/docs/adr/anvil-api-ADR-004-overlaid-eikonal-light-columnar-residuals-and-adaptive-rank-exclusion.md), [`anvil-api-ADR-005`](../../../api/anvil-api/docs/adr/anvil-api-ADR-005-performance-gated-entropy-and-prediction-carryovers.md), [`anvil-api-ADR-006`](../../../api/anvil-api/docs/adr/anvil-api-ADR-006-factored-layer2-pure-id-palettes-and-local-gray-bitplanes.md)
 - **Multi-Format Region Reader SPI:** [`anvil-api-ADR-002`](../../../api/anvil-api/docs/adr/anvil-api-ADR-002-multi-format-region-support.md)
 - **Multi-Loader Runtime Carrier & Bytecode Interceptor:** [`leafanvil-ADR-001`](adr/leafanvil-ADR-001-Multi-Loader-lca-world-storage-and-bytecode-interceptor.md)
 - **In-Memory `.lca` Chunk Representation & Dirty-Overlay Compaction:** [`leafanvil-ADR-002`](adr/leafanvil-ADR-002-in-memory-lca-chunk-representation-and-dirty-overlay-compaction.md)
