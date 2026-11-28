@@ -15,7 +15,7 @@ Yes — **LeafAnvil supports Minecraft `1.21.x` (`1.21.1`–`1.21.11`), `26.1`, 
 | **Spigot / CraftBukkit** | `1.21.x`, `26.1`, `26.2`, `26.3` | Java 21+ | `ServerLevel` / `ChunkMap` `RegionFileStorage` interception + `.lca` / `.mca` dual-read | **Supported** |
 | **Fabric** (`fabric-loader`) | `1.21.x`, `26.1`, `26.2`, `26.3` | Java 21+ | Server & client mod (`LeafAnvil` + `LeafAnvil-Client` for Mode B `LCD2` decoding) | **Supported** |
 | **NeoForge** | `1.21.x`, `26.1`, `26.2`, `26.3` | Java 21+ | Server & client mod (`LeafAnvil` + `LeafAnvil-Client` for Mode B `LCD2` decoding) | **Supported** |
-| **PumpkinMC (`crates/pumpkin-world`)** | `1.20.x`, `1.21.x`, `26.1`–`26.3` | None (Native Rust) | Pure-Rust `lca-format` + Direct `SectionFrame` Bridge (`[world.chunk] type = "lca"`, [`leafanvil-ADR-004`](../adr/leafanvil-ADR-004-pumpkinmc-rust-lca-direct-section-bridge-and-golden-fixtures.md)) | **Spec & Golden Fixtures Verified** |
+| **PumpkinMC (`crates/pumpkin-world`)** | External / Community | None (Native Rust) | Open `MIT` specification ([`LCA-ICD-3.0`](../../../../api/anvil-api/docs/ICD.md)) + `LcaGoldenFixtureExporter`; in-tree `0x0002` Rust prototype retired ([`leafanvil-ADR-004`](../adr/leafanvil-ADR-004-pumpkinmc-rust-lca-direct-section-bridge-and-golden-fixtures.md)) | **Retired In-Tree (Open Spec)** |
 | **Velocity / BungeeCord** | `1.21.x`, `26.1`, `26.2`, `26.3` | Java 21+ | Pass-through for `leafanvil:cap` / `leafanvil:chunk` (`LCD2`) plugin-messaging channels; pair with **LeafShard** for cross-backend region leases | **Compatible** |
 
 ### Version-Independent Storage Discovery (`26.2` / `26.3`)

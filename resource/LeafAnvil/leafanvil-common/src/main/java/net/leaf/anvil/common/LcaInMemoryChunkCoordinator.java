@@ -1,6 +1,8 @@
 package net.leaf.anvil.common;
 
+import io.github.dailystruggle.anvil.LcaDecodedChunkMeta;
 import io.github.dailystruggle.anvil.LcaRegionFileStorage;
+import io.github.dailystruggle.anvil.LcaRegionReader;
 import io.github.dailystruggle.anvil.LcaSectionBacking;
 import io.github.dailystruggle.anvil.LcaSectionBacking.CompactionSnapshot;
 import io.github.dailystruggle.anvil.LcaSectionBacking.EpochCommitFence;
@@ -48,6 +50,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.IntFunction;
@@ -64,6 +67,7 @@ import java.util.function.IntPredicate;
  * @governedBy leafanvil-ADR-005
  * @governedBy leafanvil-ADR-006
  * @governedBy anvil-api-ADR-003
+ * @governedBy anvil-api-ADR-007
  * @governedBy ADR-115
  * @trace REQ-RTP-S-002, REQ-RTP-S-004, REQ-RTP-S-005
  * @trace REQ-RTP-S-002
@@ -130,6 +134,162 @@ public final class LcaInMemoryChunkCoordinator {
     private final ClientOrderedBatchCommitQueue clientCommitQueue = new ClientOrderedBatchCommitQueue();
     private final boolean c2meDetected;
     private final int compactionWorkerThreads;
+
+    private final AtomicLong directOffHeapReads = new AtomicLong();
+    private final AtomicLong directOffHeapActivations = new AtomicLong();
+    private final AtomicLong fastNbtBypassed = new AtomicLong();
+    private final AtomicLong fastNbtParsed = new AtomicLong();
+    private final AtomicLong recalcBlockCountsSkipped = new AtomicLong();
+    private final AtomicLong directLoadFallbacks = new AtomicLong();
+    private final AtomicLong directBindNanos = new AtomicLong();
+    private final AtomicLong directActivateNanos = new AtomicLong();
+
+    /**
+     * Sub-stage telemetry snapshot for the zero-copy off-heap Mode A load pipeline
+     * (`anvil-api-ADR-007`).
+     */
+    public record DirectLoadTelemetrySnapshot(
+            long directOffHeapReads,
+            long directOffHeapActivations,
+            long fastNbtBypassed,
+            long fastNbtParsed,
+            long recalcBlockCountsSkipped,
+            long directLoadFallbacks,
+            long directBindNanos,
+            long directActivateNanos
+    ) {}
+
+    public void recordDirectOffHeapRead() {
+        directOffHeapReads.incrementAndGet();
+    }
+
+    public void recordDirectOffHeapActivation(long activateNanos) {
+        directOffHeapActivations.incrementAndGet();
+        if (activateNanos > 0L) {
+            directActivateNanos.addAndGet(activateNanos);
+        }
+    }
+
+    public void recordDirectBindNanos(long bindNanos) {
+        if (bindNanos > 0L) {
+            directBindNanos.addAndGet(bindNanos);
+        }
+    }
+
+    public void recordFastNbtBypassed() {
+        fastNbtBypassed.incrementAndGet();
+    }
+
+    public void recordFastNbtParsed() {
+        fastNbtParsed.incrementAndGet();
+    }
+
+    public void recordRecalcBlockCountsSkipped() {
+        recalcBlockCountsSkipped.incrementAndGet();
+    }
+
+    public void recordDirectLoadFallback() {
+        directLoadFallbacks.incrementAndGet();
+    }
+
+    public DirectLoadTelemetrySnapshot directLoadTelemetrySnapshot() {
+        return new DirectLoadTelemetrySnapshot(
+                directOffHeapReads.get(),
+                directOffHeapActivations.get(),
+                fastNbtBypassed.get(),
+                fastNbtParsed.get(),
+                recalcBlockCountsSkipped.get(),
+                directLoadFallbacks.get(),
+                directBindNanos.get(),
+                directActivateNanos.get()
+        );
+    }
+
+    public void resetDirectLoadTelemetryForTests() {
+        directOffHeapReads.set(0L);
+        directOffHeapActivations.set(0L);
+        fastNbtBypassed.set(0L);
+        fastNbtParsed.set(0L);
+        recalcBlockCountsSkipped.set(0L);
+        directLoadFallbacks.set(0L);
+        directBindNanos.set(0L);
+        directActivateNanos.set(0L);
+    }
+
+    /**
+     * Zero-copy load carrier attached transiently to an NMS {@code CompoundTag} shell between
+     * {@code IOWorker} off-heap slice lookup, parallel worker {@code view.bind()}, and
+     * {@code SerializableChunkData#parse}/{@code #read} direct activation (`anvil-api-ADR-007`).
+     */
+    public static final class DirectOffHeapLoadCarrier {
+        private final LcaRegionReader.DirectOffHeapChunkView view;
+        private final LcaRegionFileStorage storage;
+        private final String worldKey;
+        private final int chunkX;
+        private final int chunkZ;
+        private volatile LcaDecodedChunkMeta boundMeta;
+        private volatile Object residualCompoundTag;
+        private volatile LcaSectionBacking[] prebuiltBackings;
+
+        public DirectOffHeapLoadCarrier(
+                LcaRegionReader.DirectOffHeapChunkView view,
+                LcaRegionFileStorage storage,
+                String worldKey,
+                int chunkX,
+                int chunkZ
+        ) {
+            this.view = Objects.requireNonNull(view, "view");
+            this.storage = storage;
+            this.worldKey = normalizeWorldKey(worldKey);
+            this.chunkX = chunkX;
+            this.chunkZ = chunkZ;
+        }
+
+        public LcaRegionReader.DirectOffHeapChunkView view() {
+            return view;
+        }
+
+        public LcaRegionFileStorage storage() {
+            return storage;
+        }
+
+        public String worldKey() {
+            return worldKey;
+        }
+
+        public int chunkX() {
+            return chunkX;
+        }
+
+        public int chunkZ() {
+            return chunkZ;
+        }
+
+        public LcaDecodedChunkMeta boundMeta() {
+            return boundMeta;
+        }
+
+        public void setBoundMeta(LcaDecodedChunkMeta boundMeta) {
+            this.boundMeta = boundMeta;
+        }
+
+        public Object residualCompoundTag() {
+            return residualCompoundTag;
+        }
+
+        public void setResidualCompoundTag(Object residualCompoundTag) {
+            this.residualCompoundTag = residualCompoundTag;
+        }
+
+        public LcaSectionBacking[] prebuiltBackings() {
+            return prebuiltBackings;
+        }
+
+        public void setPrebuiltBackings(LcaSectionBacking[] prebuiltBackings) {
+            this.prebuiltBackings = prebuiltBackings;
+        }
+    }
+
     public record WorldVoxelStorageBinding(
             LcaRegionFileStorage voxelStorage,
             Function<String, Integer> canonicalToRuntimeId,
@@ -592,6 +752,7 @@ public final class LcaInMemoryChunkCoordinator {
         private final int initialTick32;
         private final LcaSectionBacking[] sections;
         private volatile RawChunkFrameSnapshot coldSnapshot;
+        private volatile LcaRegionReader.DirectOffHeapChunkView directOffHeapView;
         private volatile byte[] chunkFrame;
         private volatile int[] sectionOffsets;
         private volatile LcaRegionFileStorage backingStorage;
@@ -636,8 +797,43 @@ public final class LcaInMemoryChunkCoordinator {
             }
         }
 
+        void bindDirectOffHeapView(
+                LcaRegionReader.DirectOffHeapChunkView viewOrNull,
+                LcaRegionFileStorage storageOrNull,
+                Function<String, Integer> canonicalToRuntimeOrNull,
+                IntFunction<String> runtimeToCanonicalOrNull
+        ) {
+            this.directOffHeapView = viewOrNull;
+            this.backingStorage = storageOrNull;
+            this.canonicalToRuntimeId = canonicalToRuntimeOrNull;
+            this.runtimeIdToCanonical = runtimeToCanonicalOrNull;
+        }
+
+        public LcaRegionReader.DirectOffHeapChunkView directOffHeapView() {
+            return directOffHeapView;
+        }
+
         public RawChunkFrameSnapshot coldSnapshot() {
-            return coldSnapshot;
+            RawChunkFrameSnapshot snap = this.coldSnapshot;
+            if (snap != null) {
+                return snap;
+            }
+            LcaRegionReader.DirectOffHeapChunkView view = this.directOffHeapView;
+            if (view == null) {
+                return null;
+            }
+            synchronized (this) {
+                snap = this.coldSnapshot;
+                if (snap == null && this.directOffHeapView != null) {
+                    snap = this.directOffHeapView.materializeSnapshot();
+                    this.coldSnapshot = snap;
+                    if (snap != null) {
+                        this.chunkFrame = snap.chunkFrame();
+                        this.sectionOffsets = snap.computeSectionRelStarts();
+                    }
+                }
+                return snap;
+            }
         }
 
         public byte[] coldChunkFrame() {
@@ -1026,6 +1222,41 @@ public final class LcaInMemoryChunkCoordinator {
                 coldSnapshot,
                 binding != null ? binding.voxelStorage() : null,
                 lookup,
+                binding != null ? binding.runtimeIdToCanonical() : null
+        );
+        return col;
+    }
+
+    /**
+     * Attaches a chunk column whose {@link LcaSectionBacking} array was already constructed directly
+     * from a zero-copy off-heap {@link LcaRegionReader.DirectOffHeapChunkView} (`anvil-api-ADR-007`)
+     * without invoking a duplicate {@code readRawChunkFrame} disk read or heap slab copy.
+     */
+    public TrackedChunkColumn attachDirectOffHeapColumn(
+            String worldName,
+            int chunkX,
+            int chunkZ,
+            LcaRegionReader.DirectOffHeapChunkView directOffHeapView,
+            LcaSectionBacking[] prebuiltBackings,
+            Object[] nmsLevelChunkSectionsOrNull,
+            long currentTick,
+            boolean evictToZeroBitShell
+    ) {
+        Objects.requireNonNull(prebuiltBackings, "prebuiltBackings");
+        WorldVoxelStorageBinding binding = getWorldVoxelStorageBinding(worldName);
+        TrackedChunkColumn col = attachChunkColumn(
+                worldName,
+                chunkX,
+                chunkZ,
+                prebuiltBackings,
+                nmsLevelChunkSectionsOrNull,
+                currentTick,
+                evictToZeroBitShell
+        );
+        col.bindDirectOffHeapView(
+                directOffHeapView,
+                binding != null ? binding.voxelStorage() : null,
+                binding != null ? binding.canonicalToRuntimeId() : null,
                 binding != null ? binding.runtimeIdToCanonical() : null
         );
         return col;

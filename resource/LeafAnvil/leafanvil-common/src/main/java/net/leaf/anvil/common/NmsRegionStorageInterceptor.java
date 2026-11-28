@@ -601,6 +601,20 @@ public final class NmsRegionStorageInterceptor {
     private static final Map<LcaRegionFileStorage.LcaWorldStorageSession, List<InstalledCacheSwap>>
             INSTALLED_SESSION_SWAPS = new ConcurrentHashMap<>();
 
+    private static final Map<Object, LcaRegionFileStorage> INTERCEPTED_STORAGES =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    /**
+     * Resolves the {@link LcaRegionFileStorage} bound to an intercepted NMS
+     * {@code RegionFileStorage}, or {@code null} when not intercepted (`anvil-api-ADR-007`).
+     */
+    public static LcaRegionFileStorage lookupInterceptedStorage(Object regionFileStorage) {
+        if (regionFileStorage == null) {
+            return null;
+        }
+        return INTERCEPTED_STORAGES.get(regionFileStorage);
+    }
+
     /**
      * Discovers all `RegionFileStorage` instances reachable from `worldOrServerLevel` and installs
      * `.lca` cache bridges mapped to the matching storage (`region/`, `entities/`, `poi/`) in `session`.
@@ -663,6 +677,7 @@ public final class NmsRegionStorageInterceptor {
         }
         for (int i = swaps.size() - 1; i >= 0; i--) {
             InstalledCacheSwap swap = swaps.get(i);
+            INTERCEPTED_STORAGES.remove(swap.regionFileStorage());
             Object current = UNSAFE.getObjectVolatile(swap.regionFileStorage(), swap.fieldOffset());
             if (current == swap.bridgeCache()) {
                 UNSAFE.putObjectVolatile(swap.regionFileStorage(), swap.fieldOffset(), swap.previousCache());
@@ -701,6 +716,7 @@ public final class NmsRegionStorageInterceptor {
             cacheField.setAccessible(true);
             Object currentCache = cacheField.get(regionFileStorage);
             if (currentCache != null && currentCache.getClass().getName().contains("$$LeafAnvilCacheBridge")) {
+                INTERCEPTED_STORAGES.put(regionFileStorage, lcaStorage);
                 return true;
             }
 
@@ -730,6 +746,7 @@ public final class NmsRegionStorageInterceptor {
 
             long fieldOffset = UNSAFE.objectFieldOffset(cacheField);
             UNSAFE.putObjectVolatile(regionFileStorage, fieldOffset, newCache);
+            INTERCEPTED_STORAGES.put(regionFileStorage, lcaStorage);
             if (recordedSwaps != null) {
                 recordedSwaps.add(new InstalledCacheSwap(regionFileStorage, fieldOffset, currentCache, newCache));
             }

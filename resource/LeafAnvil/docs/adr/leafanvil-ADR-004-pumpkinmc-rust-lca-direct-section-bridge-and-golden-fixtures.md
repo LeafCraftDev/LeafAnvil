@@ -1,7 +1,8 @@
 # leafanvil-ADR-004: PumpkinMC Pure-Rust `.lca` Codec (`lca-format`), Direct `SectionFrame` Bridge, Cross-Language Golden Fixture Suite & Performance Proof Contract
 
-- **Status:** Accepted
-- **Date:** 2026-11-11
+- **Status:** Retired (`0x0002` Prototype; in-tree Rust crate removed `2026-11-27`)
+- **Date:** 2026-11-11 (Retired 2026-11-27)
+- **Retirement Note:** The in-tree `resource/LeafAnvil/rust/lca-format` crate remained pinned to `LCA-ICD-1.0` (`0x0002`), was unused in production builds or CI, and rejected `0x0003` (`LCA-ICD-3.0`) archives (`CBIT T1`). To eliminate zero-usage cross-language lockstep maintenance and avoid exporting an incompatible parser, `resource/LeafAnvil/rust/lca-format` has been removed. The MIT-licensed [`api/anvil-api/docs/ICD.md`](../../../../api/anvil-api/docs/ICD.md) (`LCA-ICD-3.0`) and `LcaGoldenFixtureExporter` (`-Dlca.golden.exportDir=<path>`) remain the canonical open cross-language interoperability contract for any external Rust/C++ implementation.
 - **Scope:** `:resource:LeafAnvil` (`docs/adr/`, `docs/dev/SUPPORT_MATRIX.md`), `:anvil-api` (`io.github.dailystruggle.anvil.LcaGoldenFixtureExporter`, `LcaGoldenFixtureTest`), & external Rust target (`Pumpkin-MC/Pumpkin` `crates/pumpkin-world` + `lca-format`)
 - **Related ADRs & Specs:** [`leafanvil-ADR-001`](leafanvil-ADR-001-Multi-Loader-lca-world-storage-and-bytecode-interceptor.md), [`leafanvil-ADR-002`](leafanvil-ADR-002-in-memory-lca-chunk-representation-and-dirty-overlay-compaction.md), [`leafanvil-ADR-003`](leafanvil-ADR-003-negotiated-lca-chunk-network-streaming-and-delta-sync.md), [`anvil-api-ADR-002`](../../../../api/anvil-api/docs/adr/anvil-api-ADR-002-multi-format-region-support.md), [`anvil-api-ADR-003`](../../../../api/anvil-api/docs/adr/anvil-api-ADR-003-hilbert-roaring-gray-chunk-archive.md), [`leafrtp-ADR-072`](../../../LeafRTP/docs/adr/leafrtp-ADR-072-zero-reallocation-flat-bitpacked-chunk-sections.md), [`LCA-ICD-1.0` (`api/anvil-api/docs/ICD.md`)](../../../../api/anvil-api/docs/ICD.md)
 

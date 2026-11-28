@@ -4,6 +4,12 @@ All notable changes to `LeafAnvil` are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **O(1) sparse `PostProcessing` (`extFlags 0x08`) and dictionary-encoded `structures` (`extFlags 0x10`) in `LCA-ICD-3.0` (`0x0003`) (`anvil-api-ADR-004`):** Extends `boilerplateFlags16` bit `15` (`0x8000`) with zero-Zstd/Zlib, self-contained `SparsePostProcessingStream` and `DictStructuresStream` sub-streams (static built-in structure dictionary + chunk-local UTF-8 palette + chunk-relative ZigZag-VarInt `BB` bounding boxes) and updates `CBIT T5` mutual-exclusion and Tier-2 slab reverse-scan validation.
+
+### Removed
+- **Retired the unused `0x0002` pure-Rust `resource/LeafAnvil/rust/lca-format` prototype crate (`leafanvil-ADR-004`):** Removed the unmaintained `LCA-ICD-1.0` (`0x0002`) Rust crate to eliminate zero-usage cross-language lockstep maintenance; the MIT-licensed [`api/anvil-api/docs/ICD.md`](../../api/anvil-api/docs/ICD.md) (`LCA-ICD-3.0`) and `LcaGoldenFixtureExporter` remain the canonical open-interoperability contract.
+
 ## [0.3.0] - 2026-11-21
 
 ### Added

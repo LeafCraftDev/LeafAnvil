@@ -88,6 +88,26 @@ public interface LcaSectionBridge {
     }
 
     /**
+     * Installs precomputed {@code O(paletteSize)} section block/fluid counts directly onto a
+     * {@code LevelChunkSection} during zero-copy off-heap activation (`anvil-api-ADR-007`),
+     * avoiding a redundant 4,096-voxel {@code recalcBlockCounts()} scan.
+     */
+    default void leafanvil$setColdBackedCounts(
+            short nonEmptyBlockCount,
+            short fluidCount,
+            short tickingBlockCount,
+            short tickingFluidCount
+    ) {
+    }
+
+    /**
+     * Marks whether the next {@code recalcBlockCounts()} call on this section may be skipped
+     * because exact counts were pre-installed from {@code paletteVoxelCounts}.
+     */
+    default void leafanvil$setSkipRecalcBlockCounts(boolean skip) {
+    }
+
+    /**
      * Masks {@code (x & 15)}, {@code (y & 15)}, {@code (z & 15)} at entry and resolves the 19-bit
      * block state ID from the 3-layer {@link LcaSectionBacking}.
      */
@@ -147,6 +167,18 @@ public interface LcaSectionBridge {
             LcaSectionBacking backing = leafanvil$getOwnerBacking();
             int stateId = backing != null ? Math.max(0, backing.uniformStateId()) : 0;
             return LcaSectionBridge.evictPalettedContainerBitStorageToZeroBitShell(this, stateId);
+        }
+
+        /**
+         * Attaches an {@link LcaSectionBacking} to a freshly constructed 0-bit
+         * {@code PalettedContainer} shell without reflective {@code ZeroBitStorage} eviction
+         * (`anvil-api-ADR-007`).
+         */
+        default void leafanvil$bindPreEvictedZeroBitShell(LcaSectionBacking backing) {
+            leafanvil$setOwnerBacking(backing);
+            if (backing != null) {
+                leafanvil$evictVanillaBitStorageToZeroBitShell();
+            }
         }
     }
 
